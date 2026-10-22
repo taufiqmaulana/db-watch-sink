@@ -39,6 +39,10 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
             queryTimeoutSeconds = Objects.requireNonNullElse(queryTimeoutSeconds, 300);
             sinks = Objects.requireNonNullElse(sinks, List.of());
         }
+
+        public JobDef withName(String newName) {
+            return new JobDef(newName, source, keys, columns, mode, batchSize, fetchSize, maxDeletePercent, queryTimeoutSeconds, sinks);
+        }
     }
 
     public record SourceDef(String connection, String object) {}

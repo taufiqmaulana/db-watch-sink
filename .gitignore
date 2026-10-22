@@ -5,3 +5,4 @@ data/
 *.db-shm
 .idea/
 *.iml
+node_modules/

@@ -16,6 +16,8 @@
     <module>datasync-dialect-oracle</module>
     <module>datasync-dialect-postgres</module>
     <module>datasync-cli</module>
+    <module>datasync-ui</module>
+    <module>datasync-server</module>
   </modules>
 
   <properties>

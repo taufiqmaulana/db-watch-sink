@@ -163,20 +163,37 @@ public final class StateStore implements AutoCloseable {
         }
     }
 
-    private interface SqlWork {
-        void run() throws SQLException;
+    public interface SqlFunction<T> {
+        T apply(Connection c) throws SQLException;
     }
 
-    private void inTransaction(SqlWork work) throws SQLException {
+    /**
+     * Runs {@code work} in one transaction, serialized with every other access to the store.
+     * A nested call joins the transaction already open.
+     */
+    public synchronized <T> T transact(SqlFunction<T> work) throws SQLException {
+        if (!conn.getAutoCommit()) return work.apply(conn);
         conn.setAutoCommit(false);
         try {
-            work.run();
+            T result = work.apply(conn);
             conn.commit();
+            return result;
         } catch (SQLException | RuntimeException e) {
             conn.rollback();
             throw e;
         } finally {
             conn.setAutoCommit(true);
         }
+    }
+
+    private interface SqlWork {
+        void run() throws SQLException;
+    }
+
+    private void inTransaction(SqlWork work) throws SQLException {
+        transact(c -> {
+            work.run();
+            return null;
+        });
     }
 }

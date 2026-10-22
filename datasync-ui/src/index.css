@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+/* Light and dark are both chosen palettes, not an automatic flip. */
+:root {
+  color-scheme: light;
+  --background: #f9f9f7;
+  --surface: #fcfcfb;
+  --foreground: #0b0b0b;
+  --muted: #f1f0ec;
+  --muted-foreground: #52514e;
+  --subtle-foreground: #898781;
+  --border: #e1e0d9;
+  --ring: #2a78d6;
+  --primary: #2a78d6;
+  --primary-foreground: #ffffff;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --warning: #fab219;
+  --warning-text: #8a5a00;
+  --critical: #d03b3b;
+  --critical-text: #b42727;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --background: #0d0d0d;
+    --surface: #1a1a19;
+    --foreground: #f0efec;
+    --muted: #232322;
+    --muted-foreground: #c3c2b7;
+    --subtle-foreground: #898781;
+    --border: #2c2c2a;
+    --ring: #3987e5;
+    --primary: #3987e5;
+    --primary-foreground: #ffffff;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --good-text: #0ca30c;
+    --warning-text: #fab219;
+    --critical-text: #e66767;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-good: var(--good);
+  --color-good-text: var(--good-text);
+  --color-warning: var(--warning);
+  --color-warning-text: var(--warning-text);
+  --color-critical: var(--critical);
+  --color-critical-text: var(--critical-text);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+}

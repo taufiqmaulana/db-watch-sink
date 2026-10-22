@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.datasync</groupId>
+    <artifactId>datasync</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>datasync-ui</artifactId>
+  <description>React management UI. Vite builds it into META-INF/resources, which the server serves as static files.</description>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <executable>npm</executable>
+        </configuration>
+        <executions>
+          <execution>
+            <id>npm-ci</id>
+            <phase>generate-resources</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <arguments><argument>ci</argument><argument>--no-audit</argument><argument>--no-fund</argument></arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>npm-build</id>
+            <phase>generate-resources</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <arguments><argument>run</argument><argument>build</argument></arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>npm-test</id>
+            <phase>test</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <skip>${skipTests}</skip>
+              <arguments><argument>test</argument></arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
