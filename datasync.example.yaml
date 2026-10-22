@@ -1,0 +1,29 @@
+# Run: java -jar datasync-cli/target/datasync.jar run datasync.example.yaml [--job NAME] [--state data/datasync.db] [--allow-deletes]
+connections:
+  - name: oracle_prod
+    kind: jdbc-oracle
+    url: jdbc:oracle:thin:@//ora-host:1521/ORCLPDB1
+    username: sync_ro
+    password: ${env:ORA_PASSWORD}
+  - name: pg_dw
+    kind: jdbc-postgres
+    url: jdbc:postgresql://pg-host:5432/dw
+    username: sync_rw
+    password: ${env:PG_PASSWORD}
+
+jobs:
+  - name: customers_sync
+    source: { connection: oracle_prod, object: HR.CUSTOMERS_V }
+    keys: [CUSTOMER_ID]               # required for views; tables default to their primary key
+    columns: { include: "*", exclude: [], rename: { CUST_NAME: customer_name } }
+    mode: SNAPSHOT_DIFF
+    batchSize: 10000
+    fetchSize: 5000
+    maxDeletePercent: 20
+    queryTimeoutSeconds: 300
+    sinks:
+      - type: jdbc
+        connection: pg_dw
+        target: public.customers
+        autoCreate: true
+        deleteMode: SOFT                # SOFT | HARD | IGNORE
