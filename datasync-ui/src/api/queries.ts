@@ -38,13 +38,16 @@ export function useAccess() {
 
 export const useOverview = () => useQuery({ queryKey: keys.overview, queryFn: () => call(api.GET("/api/v1/overview")) });
 
-export const useJobs = () => useQuery({ queryKey: keys.jobs, queryFn: () => call(api.GET("/api/v1/jobs")) });
+/** Refreshed every 30 s as well as on live updates, so next-run times stay current. */
+export const useJobs = () =>
+  useQuery({ queryKey: keys.jobs, queryFn: () => call(api.GET("/api/v1/jobs")), refetchInterval: 30_000 });
 
 export const useJob = (id: string | undefined) =>
   useQuery({
     queryKey: keys.job(id ?? ""),
     queryFn: () => call(api.GET("/api/v1/jobs/{id}", { params: { path: { id: id! } } })),
     enabled: Boolean(id),
+    refetchInterval: 30_000,
   });
 
 export const useRuns = (id: string) =>

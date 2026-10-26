@@ -39,7 +39,25 @@ export const jobSchema = z.object({
   queryTimeoutSeconds: count(1, 86_400),
   maxDeletePercent: count(0, 100),
   sinks: z.array(sinkSchema).min(1, "Add at least one sink"),
+  scheduleKind: z.enum(["interval", "cron"]),
+  every: z.string().refine((s) => !s.trim() || (intervalSeconds(s) ?? 0) >= 10, "Use a number with s, m or h, at least 10s"),
+  cron: z.string().refine((s) => !s.trim() || /^\S+(\s+\S+){4}$/.test(s.trim()), "Use five fields: minute hour day month weekday"),
+  fixedDelay: z.boolean(),
+  jitterPercent: count(0, 50),
 });
+
+/** Seconds in an interval such as "30s", "5m" or "2h", or null when it is not one. */
+export function intervalSeconds(text: string) {
+  const m = /^(\d+)\s*([smh])$/i.exec(text.trim());
+  if (!m) return null;
+  return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2].toLowerCase() as "s" | "m" | "h"];
+}
+
+/** "Every 5m", "Every 30s after the previous run ends", or "Cron 0 2 * * *". */
+export function describeSchedule(def: Pick<JobDef, "every" | "schedule" | "fixedDelay">) {
+  if (!def.every) return `Cron ${def.schedule}`;
+  return def.fixedDelay ? `Every ${def.every} after the previous run ends` : `Every ${def.every}`;
+}
 
 export type JobFormValues = z.infer<typeof jobSchema>;
 export type ColumnRow = JobFormValues["columns"][number];
@@ -65,6 +83,11 @@ export const emptyJob: JobFormValues = {
   queryTimeoutSeconds: 300,
   maxDeletePercent: 20,
   sinks: [newSink()],
+  scheduleKind: "interval",
+  every: "5m",
+  cron: "*/5 * * * *",
+  fixedDelay: false,
+  jitterPercent: 10,
 };
 
 export function typeLabel(t: Schemas["CanonicalType"]) {
@@ -95,6 +118,11 @@ export function toJobDef(v: JobFormValues): JobDef {
     queryTimeoutSeconds: v.queryTimeoutSeconds,
     maxDeletePercent: v.maxDeletePercent,
     sinks: sinks as unknown as JobDef["sinks"],
+    // an empty interval means "use the cron expression"
+    schedule: v.cron.trim() || emptyJob.cron,
+    every: v.scheduleKind === "interval" ? v.every.trim() : "",
+    fixedDelay: v.scheduleKind === "interval" && v.fixedDelay,
+    jitterPercent: v.jitterPercent,
   };
 }
 
@@ -122,6 +150,11 @@ export function fromJobDef(def: JobDef): JobFormValues {
     queryTimeoutSeconds: def.queryTimeoutSeconds,
     maxDeletePercent: def.maxDeletePercent,
     sinks,
+    scheduleKind: def.every ? "interval" : "cron",
+    every: def.every || emptyJob.every,
+    cron: def.schedule,
+    fixedDelay: def.fixedDelay,
+    jitterPercent: def.jitterPercent,
   };
 }
 

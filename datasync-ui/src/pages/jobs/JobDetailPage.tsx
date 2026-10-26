@@ -14,7 +14,8 @@ import { Card, CardHeader, Empty, PageHeader, Spinner, Table, Td, Th } from "@/c
 import { Tabs } from "@/components/ui/tabs";
 import { formatDateTime, formatDuration, formatNumber, formatRelative } from "@/lib/format";
 import { toYaml } from "@/lib/yaml";
-import { useConnectionNames, useJobActions } from "./actions";
+import { nextRunLabel, useConnectionNames, useJobActions } from "./actions";
+import { describeSchedule } from "./jobForm";
 
 // Recharts is large; load it only when a job page shows the chart
 const RunsChart = lazy(() => import("./RunsChart"));
@@ -175,6 +176,7 @@ function Overview({ job, runs }: { job: JobView; runs: RunView[] }) {
           <Stat label="Rows read">{last ? formatNumber(last.rowsRead) : "—"}</Stat>
           <Stat label="Upserts">{last ? formatNumber(last.upserts) : "—"}</Stat>
           <Stat label="Deletes">{last ? formatNumber(last.deletes) : "—"}</Stat>
+          <Stat label="Next run">{nextRunLabel(job)}</Stat>
         </dl>
         {last?.error && last.state === "FAILED" && (
           <div className="px-5 pb-5">
@@ -196,6 +198,7 @@ function Overview({ job, runs }: { job: JobView; runs: RunView[] }) {
               </p>
             ))}
           </Stat>
+          <Stat label="Schedule">{describeSchedule(c)}</Stat>
           <Stat label="Change detection">Snapshot diff, batches of {formatNumber(c.batchSize)}</Stat>
           <Stat label="Delete guard">Stop above {c.maxDeletePercent}% deleted</Stat>
         </dl>

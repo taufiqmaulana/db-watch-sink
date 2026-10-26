@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, call, type JobView } from "@/api/client";
 import { keys, useConnections } from "@/api/queries";
 import { toast } from "@/components/Toaster";
+import { formatRelative } from "@/lib/format";
 
 /** Run, pause and resume. Failures show a toast; success shows in the job's live status. */
 export function useJobActions() {
@@ -25,6 +26,14 @@ export function useJobActions() {
     onError: toast.error,
   });
   return { run, setPaused };
+}
+
+/** "in 4 minutes", or why the job will not run on its own. */
+export function nextRunLabel(job: JobView) {
+  if (job.nextRunAt) return formatRelative(job.nextRunAt);
+  if (job.status === "PAUSED") return "Paused";
+  if (job.status === "NEEDS_REVIEW") return "After review";
+  return "—";
 }
 
 /** Connection id to name, for display. */

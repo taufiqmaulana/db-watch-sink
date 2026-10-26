@@ -20,7 +20,10 @@ type Form = UseFormReturn<JobFormValues>;
 const STEPS: { title: string; fields: (keyof JobFormValues)[] }[] = [
   { title: "Source", fields: ["name", "sourceConnection", "sourceObject"] },
   { title: "Columns", fields: ["columns"] },
-  { title: "Change detection", fields: ["batchSize", "fetchSize", "queryTimeoutSeconds", "maxDeletePercent"] },
+  {
+    title: "Schedule",
+    fields: ["scheduleKind", "every", "cron", "jitterPercent", "batchSize", "fetchSize", "queryTimeoutSeconds", "maxDeletePercent"],
+  },
   { title: "Sinks", fields: ["sinks"] },
   { title: "Dry run", fields: [] },
 ];
@@ -309,15 +312,57 @@ function ColumnsStep({ form, saved }: { form: Form; saved?: JobDef }) {
 
 function DetectionStep({ form }: { form: Form }) {
   const { errors } = form.formState;
-  const number = (name: "batchSize" | "fetchSize" | "queryTimeoutSeconds" | "maxDeletePercent") =>
+  const number = (name: "batchSize" | "fetchSize" | "queryTimeoutSeconds" | "maxDeletePercent" | "jitterPercent") =>
     form.register(name, { valueAsNumber: true });
+  const kind = form.watch("scheduleKind");
   return (
     <div className="grid max-w-2xl gap-5">
+      <fieldset className="grid gap-4">
+        <legend className="mb-3 text-sm font-semibold">Schedule</legend>
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+          <label className="flex items-center gap-2">
+            <input type="radio" value="interval" className="accent-primary" {...form.register("scheduleKind")} />
+            At a fixed interval
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="radio" value="cron" className="accent-primary" {...form.register("scheduleKind")} />
+            On a cron schedule
+          </label>
+        </div>
+        {kind === "interval" ? (
+          <>
+            <Field label="Run every" hint="For example 30s, 5m or 2h; at least 10s." error={errors.every?.message}>
+              {(id) => <Input id={id} className="w-28 font-mono" {...form.register("every")} />}
+            </Field>
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox {...form.register("fixedDelay")} />
+              Count the interval from the end of each run instead of its start
+            </label>
+          </>
+        ) : (
+          <Field
+            label="Cron expression"
+            hint="Minute, hour, day of month, month, day of week, in the server's time zone. 0 2 * * * is daily at 02:00."
+            error={errors.cron?.message}
+          >
+            {(id) => <Input id={id} className="w-56 font-mono" {...form.register("cron")} />}
+          </Field>
+        )}
+        <Field
+          label="Jitter (%)"
+          hint="Delay each run by a random part of this share of the interval, so jobs on the same database do not all start at once."
+          error={errors.jitterPercent?.message}
+        >
+          {(id) => <Input id={id} type="number" min={0} max={50} className="w-28" {...number("jitterPercent")} />}
+        </Field>
+        <p className="text-sm text-muted-foreground">
+          Only active jobs run on schedule, and a run is skipped while the previous one is still going. Run now works at any time.
+        </p>
+      </fieldset>
       <div className="rounded-md bg-muted px-4 py-3 text-sm">
         <p className="font-medium">Snapshot diff</p>
         <p className="mt-0.5 text-muted-foreground">
-          Each run reads the whole source and compares it with the last run, so it needs no update timestamp and detects deletes. Runs are
-          started with Run now; scheduling is not available yet.
+          Each run reads the whole source and compares it with the last run, so it needs no update timestamp and detects deletes.
         </p>
       </div>
       <Field

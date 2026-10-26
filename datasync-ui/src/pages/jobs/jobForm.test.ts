@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ObjectSchema } from "@/api/client";
-import { columnRows, emptyJob, fromJobDef, newSink, toJobDef } from "./jobForm";
+import { columnRows, describeSchedule, emptyJob, fromJobDef, intervalSeconds, newSink, toJobDef } from "./jobForm";
 
 const schema: ObjectSchema = {
   ref: { schema: "HR", name: "CUSTOMERS" },
@@ -14,6 +14,16 @@ const schema: ObjectSchema = {
 };
 
 describe("job form", () => {
+  it("round-trips a cron schedule and drops the interval it no longer uses", () => {
+    const base = { ...emptyJob, name: "j", sourceConnection: "c1", sourceObject: "T", columns: columnRows(schema) };
+    const def = toJobDef({ ...base, scheduleKind: "cron", cron: "0 2 * * *", fixedDelay: true });
+    expect(def).toMatchObject({ schedule: "0 2 * * *", every: "", fixedDelay: false });
+    expect(fromJobDef(def)).toMatchObject({ scheduleKind: "cron", cron: "0 2 * * *", every: "5m" });
+    expect(describeSchedule(def)).toBe("Cron 0 2 * * *");
+    expect(intervalSeconds("2h")).toBe(7200);
+    expect(intervalSeconds("soon")).toBeNull();
+  });
+
   it("defaults to all non-binary columns with the primary key as key", () => {
     const rows = columnRows(schema);
     expect(rows.map((r) => [r.name, r.include, r.key])).toEqual([
@@ -41,6 +51,8 @@ describe("job form", () => {
     expect(def.keys).toEqual(["ID"]);
     expect(def.columns).toEqual({ include: ["*", "PHOTO"], exclude: ["NOTE"], rename: { NAME: "customer_name" } });
     expect(def.sinks[0]).toMatchObject({ type: "jdbc", connection: "c2", target: "public.customers", deleteMode: "SOFT" });
+
+    expect(def).toMatchObject({ every: "5m", schedule: "*/5 * * * *", fixedDelay: false, jitterPercent: 10 });
 
     expect(columnRows(schema, def)).toEqual(columns);
     expect(fromJobDef(def)).toMatchObject({ name: "customers", sourceConnection: "c1", sinks: [{ connection: "c2" }] });

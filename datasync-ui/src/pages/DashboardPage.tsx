@@ -7,7 +7,7 @@ import { JobStatusBadge, RunStateBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, Empty, PageHeader, Spinner, Table, Td, Th } from "@/components/ui/layout";
 import { cn, formatDuration, formatNumber, formatRelative } from "@/lib/format";
-import { useJobActions } from "./jobs/actions";
+import { nextRunLabel, useJobActions } from "./jobs/actions";
 
 function Tile({ label, value, note, tone, to }: { label: string; value: ReactNode; note?: ReactNode; tone?: "warning" | "critical"; to?: string }) {
   const card = (
@@ -86,6 +86,7 @@ export function DashboardPage() {
                 <Th>Last run</Th>
                 <Th>Duration</Th>
                 <Th className="text-right">Changes</Th>
+                <Th>Next run</Th>
                 {canOperate && <Th className="w-0" />}
               </tr>
             </thead>
@@ -110,6 +111,7 @@ export function DashboardPage() {
                   <Td className="text-right tabular-nums">
                     {job.lastRun ? formatNumber(job.lastRun.upserts + job.lastRun.deletes) : "—"}
                   </Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">{nextRunLabel(job)}</Td>
                   {canOperate && (
                     <Td>
                       <Button

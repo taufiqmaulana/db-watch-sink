@@ -1189,6 +1189,11 @@ export interface components {
             sinks: {
                 [key: string]: unknown;
             }[];
+            schedule: string;
+            every: string;
+            fixedDelay: boolean;
+            /** Format: int32 */
+            jitterPercent: number;
         };
         JobInput: {
             config: components["schemas"]["JobDef"];
@@ -1203,6 +1208,7 @@ export interface components {
             version: number;
             running: boolean;
             lastRun: components["schemas"]["RunView"] | null;
+            nextRunAt: ((string | components["schemas"]["Instant"] | null) | null) | components["schemas"]["Instant"] | null;
             config: components["schemas"]["JobDef"];
             createdAt: components["schemas"]["Instant"];
             updatedAt: components["schemas"]["Instant"];
