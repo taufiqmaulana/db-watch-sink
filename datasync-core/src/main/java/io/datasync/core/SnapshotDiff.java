@@ -10,16 +10,21 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * One SNAPSHOT_DIFF run (design 5.2), in the single-pass MVP variant (design 6): each chunk is diffed
  * against the hash index, applied to every sink, and only then recorded in the index. A crash in between
  * re-sends the chunk on the next run, which idempotent sinks absorb.
+ * <p>
+ * The index is per job, so it only says what changed since the last run. A sink without a completed
+ * full load (just added, or pointed at a new target) therefore gets every row of the scan instead.
  */
 final class SnapshotDiff {
 
     private final StateStore state;
     private final String runId;
+    private Set<String> loadedSinks;
     private long rowsRead, upserts, deletes, unchanged, seq, batchId;
 
     SnapshotDiff(StateStore state, String runId) {
@@ -33,6 +38,7 @@ final class SnapshotDiff {
 
     void run(Job job, boolean allowDeletes) throws SQLException {
         long indexed = state.indexSize(job.id());
+        loadedSinks = state.loadedSinks(job.id(), job.sinks().keySet());
         int chunkSize = job.readSpec().chunkSize();
         try (RecordCursor cursor = job.source().read(job.readSpec())) {
             List<Map<String, Object>> chunk = new ArrayList<>(chunkSize);
@@ -45,15 +51,19 @@ final class SnapshotDiff {
             }
             if (!chunk.isEmpty()) diff(job, chunk);
         }
+        // every sink now holds every source row; deletes below are sent to all of them
+        state.markLoaded(job.id(), job.sinks().keySet());
+        loadedSinks = job.sinks().keySet();
 
         long gone = state.countUnseen(job.id(), runId);
         if (!allowDeletes) checkDeleteGuard(job, indexed, gone);
         for (List<IndexEntry> entries; !(entries = state.unseen(job.id(), runId, chunkSize)).isEmpty(); ) {
             Instant now = Instant.now();
-            deliver(job, entries.stream()
+            List<Change> removed = entries.stream()
                 .map(e -> new Change(Change.Op.DELETE, job.mapping().key(Canonical.parse(e.keyJson())), null, null,
                     idempotencyKey(job, e.keyJson(), "del"), now, ++seq))
-                .toList());
+                .toList();
+            deliver(job, removed, removed);
             state.remove(job.id(), entries);
             deletes += entries.size();
         }
@@ -71,20 +81,25 @@ final class SnapshotDiff {
         }
 
         Map<String, String> known = state.rowHashes(job.id(), entries.stream().map(IndexEntry::keyHash).toList());
+        boolean fullLoad = !loadedSinks.containsAll(job.sinks().keySet());
         Instant now = Instant.now();
-        List<Change> changes = new ArrayList<>();
+        List<Change> changed = new ArrayList<>();
+        List<Change> all = new ArrayList<>(fullLoad ? rows.size() : 0);
         for (int i = 0; i < rows.size(); i++) {
             IndexEntry e = entries.get(i);
-            if (e.rowHash().equals(known.get(e.keyHash()))) continue;
-            changes.add(new Change(Change.Op.UPSERT, mapping.key(rows.get(i)), mapping.row(rows.get(i)), e.rowHash(),
-                idempotencyKey(job, e.keyJson(), e.rowHash()), now, ++seq));
+            boolean isChanged = !e.rowHash().equals(known.get(e.keyHash()));
+            if (!isChanged && !fullLoad) continue;
+            Change change = new Change(Change.Op.UPSERT, mapping.key(rows.get(i)), mapping.row(rows.get(i)), e.rowHash(),
+                idempotencyKey(job, e.keyJson(), e.rowHash()), now, ++seq);
+            if (isChanged) changed.add(change);
+            if (fullLoad) all.add(change);
         }
-        deliver(job, changes);
+        deliver(job, changed, all);
         state.markSeen(job.id(), runId, entries);
 
         rowsRead += rows.size();
-        upserts += changes.size();
-        unchanged += rows.size() - changes.size();
+        upserts += changed.size();
+        unchanged += rows.size() - changed.size();
     }
 
     private void checkDeleteGuard(Job job, long indexed, long gone) {
@@ -97,11 +112,14 @@ final class SnapshotDiff {
         }
     }
 
-    private void deliver(Job job, List<Change> changes) {
-        if (changes.isEmpty()) return;
+    /** {@code changed} goes to fully loaded sinks, {@code all} to sinks still waiting for their full load. */
+    private void deliver(Job job, List<Change> changed, List<Change> all) {
+        if (changed.isEmpty() && all.isEmpty()) return;
         batchId++;
-        job.sinks().forEach((sinkId, sink) ->
-            sink.apply(new ChangeBatch(job.id(), sinkId, batchId, job.mapping().target(), changes)));
+        job.sinks().forEach((sinkId, sink) -> {
+            List<Change> batch = loadedSinks.contains(sinkId) ? changed : all;
+            if (!batch.isEmpty()) sink.apply(new ChangeBatch(job.id(), sinkId, batchId, job.mapping().target(), batch));
+        });
     }
 
     private static String idempotencyKey(Job job, String keyJson, String rowHashOrDel) {

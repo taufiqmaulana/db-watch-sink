@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -68,6 +69,16 @@ class ApiTest {
         assertThat(query("SELECT string_agg(title, ',' ORDER BY id) FROM items_copy")).isEqualTo("a,b");
 
         as(admin).body(Map.of("config", config, "version", 99)).put("/jobs/" + jobId).then().statusCode(409);
+
+        // a sink added to a job that already ran gets the existing rows, not only later changes
+        Map<String, Object> twoSinks = new HashMap<>(config);
+        twoSinks.put("sinks", List.of(
+            Map.of("type", "jdbc", "connection", connId, "target", "public.items_copy"),
+            Map.of("type", "jdbc", "connection", connId, "target", "public.items_copy2")));
+        as(admin).body(Map.of("config", twoSinks, "version", 1)).put("/jobs/" + jobId).then().statusCode(200);
+        as(admin).post("/jobs/" + jobId + "/run").then().statusCode(202);
+        awaitRunFinished(admin, jobId);
+        assertThat(query("SELECT string_agg(title, ',' ORDER BY id) FROM items_copy2")).isEqualTo("a,b");
         as(admin).delete("/connections/" + connId).then().statusCode(409).body("message", containsString("items_sync"));
 
         as(admin).body(Map.of("username", "vera", "password", "viewer-password-1", "role", "VIEWER")).post("/users").then().statusCode(201);
@@ -78,7 +89,7 @@ class ApiTest {
         as(viewer).get("/users").then().statusCode(403);
 
         as(admin).get("/audit").then().statusCode(200).body("action", hasItem("job.run"));
-        as(admin).get("/overview").then().statusCode(200).body("jobs", equalTo(1)).body("runs24h", equalTo(1));
+        as(admin).get("/overview").then().statusCode(200).body("jobs", equalTo(1)).body("runs24h", equalTo(2));
     }
 
     private static String login(String username, String password, boolean mustChange) {

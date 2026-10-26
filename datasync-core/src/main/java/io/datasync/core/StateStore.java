@@ -16,9 +16,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -141,6 +143,45 @@ public final class StateStore implements AutoCloseable {
                 for (IndexEntry e : entries) {
                     ps.setString(1, jobId);
                     ps.setBytes(2, HEX.parseHex(e.keyHash()));
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        });
+    }
+
+    /**
+     * The sinks among {@code current} that have had a full load. Records of sinks the job no longer has are
+     * dropped, so a sink that is removed and added back is loaded again.
+     */
+    synchronized Set<String> loadedSinks(String jobId, Set<String> current) throws SQLException {
+        return transact(c -> {
+            Set<String> loaded = new HashSet<>();
+            try (PreparedStatement select = c.prepareStatement("SELECT sink_id FROM sink_load WHERE job_id = ?");
+                 PreparedStatement delete = c.prepareStatement("DELETE FROM sink_load WHERE job_id = ? AND sink_id = ?")) {
+                select.setString(1, jobId);
+                try (ResultSet rs = select.executeQuery()) {
+                    while (rs.next()) loaded.add(rs.getString(1));
+                }
+                for (String gone : loaded.stream().filter(s -> !current.contains(s)).toList()) {
+                    delete.setString(1, jobId);
+                    delete.setString(2, gone);
+                    delete.executeUpdate();
+                }
+            }
+            loaded.retainAll(current);
+            return loaded;
+        });
+    }
+
+    synchronized void markLoaded(String jobId, Set<String> sinkIds) throws SQLException {
+        inTransaction(() -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO sink_load (job_id, sink_id, loaded_at) VALUES (?, ?, ?) ON CONFLICT (job_id, sink_id) DO NOTHING")) {
+                for (String sinkId : sinkIds) {
+                    ps.setString(1, jobId);
+                    ps.setString(2, sinkId);
+                    ps.setTimestamp(3, Timestamp.from(Instant.now()));
                     ps.addBatch();
                 }
                 ps.executeBatch();

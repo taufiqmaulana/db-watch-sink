@@ -110,6 +110,7 @@ public class JobResource {
         if (runs.isRunning(id)) throw ApiErrors.conflict("Wait for the current run to finish");
         db.tx(c -> {
             Db.update(c, "DELETE FROM row_index WHERE job_id = ?", id);
+            Db.update(c, "DELETE FROM sink_load WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM run WHERE job_id = ?", id);
             return Db.update(c, "DELETE FROM job WHERE id = ?", id);
         });
@@ -190,6 +191,9 @@ public class JobResource {
         ApiErrors.range(def.maxDeletePercent(), 0, 100, "Delete guard");
         ApiErrors.range(def.queryTimeoutSeconds(), 1, 86_400, "Query timeout");
         if (def.sinks().isEmpty()) throw new IllegalArgumentException("Add at least one sink");
+        if (def.sinks().stream().map(JobRunner::sinkId).distinct().count() < def.sinks().size()) {
+            throw new IllegalArgumentException("Two sinks write to the same target table");
+        }
         for (Map<String, Object> sink : def.sinks()) {
             if (!"jdbc".equals(sink.get("type"))) throw new IllegalArgumentException("Only database sinks are supported so far");
             Object conn = sink.get("connection");

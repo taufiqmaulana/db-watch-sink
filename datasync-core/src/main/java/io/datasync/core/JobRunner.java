@@ -20,6 +20,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /** Opens a configured job, runs it once and records the outcome in the state store. */
 public final class JobRunner {
@@ -96,11 +99,11 @@ public final class JobRunner {
         try {
             ObjectSchema schema = source.describe(ObjectRef.parse(def.source().object()));
             ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys());
-            for (int i = 0; i < def.sinks().size(); i++) {
-                Map<String, Object> cfg = def.sinks().get(i);
+            for (Map<String, Object> cfg : def.sinks()) {
+                String sinkId = sinkId(cfg);
+                if (sinks.containsKey(sinkId)) throw new IllegalArgumentException("two sinks of job " + def.name() + " write to " + sinkId);
                 Object conn = cfg.get("connection");
                 Sink sink = Connectors.openSink(String.valueOf(cfg.get("type")), conn == null ? null : connection(conn.toString()));
-                String sinkId = def.name() + "/sink-" + (i + 1);
                 sinks.put(sinkId, sink);
                 sink.init(new SinkContext(def.name(), sinkId, cfg), mapping.target());
             }
@@ -112,6 +115,15 @@ public final class JobRunner {
             source.close();
             throw e;
         }
+    }
+
+    /**
+     * What a sink writes to, e.g. {@code jdbc:pg_dw:public.customers}. It stays the same when other sinks are
+     * added or removed, and changes when the target does, which then triggers a full load (see {@link SnapshotDiff}).
+     */
+    public static String sinkId(Map<String, Object> sink) {
+        return Stream.of("type", "connection", "target").map(sink::get).filter(Objects::nonNull).map(Object::toString)
+            .collect(Collectors.joining(":"));
     }
 
     private ConnectionConfig connection(String name) {

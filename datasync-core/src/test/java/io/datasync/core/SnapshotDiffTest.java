@@ -53,8 +53,12 @@ class SnapshotDiffTest {
         state = new StateStore(dir.resolve("state.db"));
         ColumnMapping mapping = ColumnMapping.resolve(SCHEMA, new ColumnsDef(null, null, Map.of("NAME", "customer_name")), List.of());
         ReadSpec spec = new ReadSpec(SCHEMA.ref(), mapping.sourceColumns(), mapping.sourceKeys(), 100, 2, Duration.ofSeconds(30));
-        job = new Job("customers", source, spec, mapping, Map.of("customers/sink-1", sink), 40);
+        job = new Job("customers", source, spec, mapping, Map.of("memory:a", sink), 40);
         for (long id = 1; id <= 5; id++) source.put(id, "c" + id, "10.00");
+    }
+
+    private void useSinks(Map<String, Sink> sinks) {
+        job = new Job(job.id(), job.source(), job.readSpec(), job.mapping(), sinks, job.maxDeletePercent());
     }
 
     @AfterEach
@@ -96,6 +100,38 @@ class SnapshotDiffTest {
         sink.batches.clear();
         run(false);
         assertThat(sink.batches.getFirst().changes().getFirst().idempotencyKey()).isEqualTo(first);
+    }
+
+    @Test
+    void aSinkAddedLaterGetsEveryRowOnceThenOnlyChanges() throws Exception {
+        run(false);
+        FakeSink added = new FakeSink();
+        useSinks(Map.of("memory:a", sink, "memory:b", added));
+        source.put(2L, "changed", "10.00");
+        sink.batches.clear();
+
+        assertThat(run(false)).isEqualTo(new RunStats(5, 1, 0, 4));
+        assertThat(added.target).hasSize(5);
+        assertThat(sink.batches).flatExtracting(ChangeBatch::changes).hasSize(1);
+
+        added.batches.clear();
+        source.put(3L, "changed too", "10.00");
+        run(false);
+        assertThat(added.batches).flatExtracting(ChangeBatch::changes).hasSize(1);
+    }
+
+    @Test
+    void aSinkRemovedAndAddedBackIsLoadedAgain() throws Exception {
+        FakeSink other = new FakeSink();
+        useSinks(Map.of("memory:a", sink, "memory:b", other));
+        run(false);
+        useSinks(Map.of("memory:a", sink));
+        run(false);
+
+        other.target.clear();
+        useSinks(Map.of("memory:a", sink, "memory:b", other));
+        run(false);
+        assertThat(other.target).hasSize(5);
     }
 
     @Test
