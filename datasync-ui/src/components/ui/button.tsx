@@ -6,7 +6,10 @@ const variants = {
   primary: "bg-primary text-primary-foreground hover:bg-primary/90",
   outline: "border border-border bg-surface hover:bg-muted",
   ghost: "hover:bg-muted",
-  destructive: "bg-critical text-white hover:bg-critical/90",
+  destructive: "bg-critical text-white hover:bg-critical/90 focus-visible:ring-critical",
+  /** Opens a destructive action (the confirm dialog then uses "destructive"). */
+  "destructive-outline": "border border-critical/40 bg-surface text-critical-text hover:bg-critical/10 focus-visible:ring-critical",
+  "destructive-ghost": "text-critical-text hover:bg-critical/10 focus-visible:ring-critical",
 };
 
 const sizes = {

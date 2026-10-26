@@ -1,5 +1,13 @@
-import type { HTMLAttributes, ReactNode, TdHTMLAttributes, ThHTMLAttributes } from "react";
+import { Loader2 } from "lucide-react";
+import { useEffect, type HTMLAttributes, type ReactNode, type TdHTMLAttributes, type ThHTMLAttributes } from "react";
 import { cn } from "@/lib/format";
+
+/** Names the browser tab after the page, e.g. "Jobs · DataSync". */
+export function useDocumentTitle(title: string | undefined) {
+  useEffect(() => {
+    document.title = title ? `${title} · DataSync` : "DataSync";
+  }, [title]);
+}
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("rounded-lg border border-border bg-surface", className)} {...props} />;
@@ -18,6 +26,7 @@ export function CardHeader({ title, description, actions }: { title: ReactNode; 
 }
 
 export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+  useDocumentTitle(typeof title === "string" ? title : undefined);
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
@@ -60,5 +69,10 @@ export function Empty({ title, children }: { title: string; children?: ReactNode
 }
 
 export function Spinner({ label = "Loading…" }: { label?: string }) {
-  return <p className="px-6 py-12 text-center text-sm text-muted-foreground">{label}</p>;
+  return (
+    <p role="status" className="flex items-center justify-center gap-2 px-6 py-12 text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" aria-hidden />
+      {label}
+    </p>
+  );
 }

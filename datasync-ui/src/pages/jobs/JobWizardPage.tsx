@@ -32,7 +32,20 @@ export function JobWizardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
+  const [discarding, setDiscarding] = useState(false);
   const form = useForm<JobFormValues>({ resolver: zodResolver(jobSchema), defaultValues: emptyJob, mode: "onTouched" });
+  const dirty = form.formState.isDirty;
+
+  // each step starts at its top, not where the last one was scrolled to
+  useEffect(() => window.scrollTo({ top: 0 }), [step]);
+
+  // closing the tab or reloading would lose the edits
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   // load a stored job once; later refetches (live updates) must not wipe edits in progress
   const loaded = useRef(false);
@@ -63,6 +76,7 @@ export function JobWizardPage() {
   const next = async () => {
     if (await form.trigger(STEPS[step].fields)) setStep(step + 1);
   };
+  const leave = () => navigate(existing.data ? `/jobs/${existing.data.id}` : "/jobs");
 
   return (
     <>
@@ -70,7 +84,7 @@ export function JobWizardPage() {
         title={existing.data ? `Edit ${existing.data.name}` : "New job"}
         description="Sync one table or view to one or more targets."
         actions={
-          <Button variant="outline" onClick={() => navigate(existing.data ? `/jobs/${existing.data.id}` : "/jobs")}>
+          <Button variant="outline" onClick={() => (dirty ? setDiscarding(true) : leave())}>
             Cancel
           </Button>
         }
@@ -108,19 +122,28 @@ export function JobWizardPage() {
             Back
           </Button>
           {step < STEPS.length - 1 ? (
-            <Button onClick={next}>Next</Button>
+            <Button onClick={next}>Next: {STEPS[step + 1].title}</Button>
           ) : (
-            <Button
-              disabled={!preview.isSuccess}
-              title={preview.isSuccess ? undefined : "Save after a successful dry run"}
-              loading={save.isPending}
-              onClick={() => save.mutate(toJobDef(form.getValues()))}
-            >
-              Save job
-            </Button>
+            <div className="flex items-center gap-3">
+              {!preview.isSuccess && !preview.isPending && (
+                <p className="hidden text-sm text-muted-foreground sm:block">Saving needs a successful dry run</p>
+              )}
+              <Button disabled={!preview.isSuccess} loading={save.isPending} onClick={() => save.mutate(toJobDef(form.getValues()))}>
+                Save job
+              </Button>
+            </div>
           )}
         </div>
       </Card>
+      <ConfirmDialog
+        open={discarding}
+        onOpenChange={setDiscarding}
+        title="Discard changes?"
+        effect={existing.data ? `Your edits to ${existing.data.name} are not saved.` : "This job has not been saved."}
+        confirmLabel="Discard"
+        destructive
+        onConfirm={leave}
+      />
     </>
   );
 }
@@ -210,6 +233,10 @@ function ColumnsStep({ form, saved }: { form: Form; saved?: JobDef }) {
   const schema = useObjectSchema(connectionId, objectName);
   const { fields, replace } = useFieldArray({ control: form.control, name: "columns" });
   const errors = form.formState.errors.columns;
+  const included = form.watch("columns").filter((c) => c.include || c.key).length;
+  // key columns are always synced, so "none" leaves them in
+  const includeAll = (include: boolean) =>
+    form.getValues("columns").forEach((c, i) => !c.key && form.setValue(`columns.${i}.include`, include, { shouldDirty: true }));
 
   useEffect(() => {
     if (!schema.data || columnsFor === loadedFor) return;
@@ -228,6 +255,17 @@ function ColumnsStep({ form, saved }: { form: Form; saved?: JobDef }) {
         picked. New source columns are picked up automatically unless you leave them out here.
       </p>
       {(errors?.message || errors?.root?.message) && <ErrorAlert error={errors.message ?? errors.root?.message} />}
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-muted-foreground">
+          {included} of {fields.length} columns selected
+        </span>
+        <Button size="sm" variant="ghost" onClick={() => includeAll(true)}>
+          Select all
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => includeAll(false)}>
+          Select none
+        </Button>
+      </div>
       <Table>
         <thead>
           <tr>
@@ -334,7 +372,7 @@ function SinksStep({ form }: { form: Form }) {
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium">Database sink {i + 1}</p>
               {fields.length > 1 && (
-                <Button size="icon" variant="ghost" aria-label={`Remove sink ${i + 1}`} onClick={() => remove(i)}>
+                <Button size="icon" variant="destructive-ghost" aria-label={`Remove sink ${i + 1}`} onClick={() => remove(i)}>
                   <Trash2 />
                 </Button>
               )}
@@ -431,9 +469,13 @@ function SinksStep({ form }: { form: Form }) {
   );
 }
 
-function renderValue(v: unknown) {
-  if (v === null || v === undefined) return <span className="text-subtle-foreground">null</span>;
+function valueText(v: unknown) {
+  if (v === null || v === undefined) return undefined;
   return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+function renderValue(v: unknown) {
+  return valueText(v) ?? <span className="text-subtle-foreground">null</span>;
 }
 
 function DryRunStep({ form, preview, saveError }: { form: Form; preview: UseMutationResult<Preview, Error, JobDef>; saveError: unknown }) {
@@ -496,7 +538,7 @@ function DryRunStep({ form, preview, saveError }: { form: Form; preview: UseMuta
                     {preview.data.rows.map((row, r) => (
                       <tr key={r}>
                         {preview.data.columns.map((c) => (
-                          <Td key={c.target} className="max-w-48 truncate font-mono text-xs">
+                          <Td key={c.target} className="max-w-48 truncate font-mono text-xs" title={valueText((row as Record<string, unknown>)[c.target])}>
                             {renderValue((row as Record<string, unknown>)[c.target])}
                           </Td>
                         ))}

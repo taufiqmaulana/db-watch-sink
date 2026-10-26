@@ -161,7 +161,7 @@ function UsersPanel() {
                     </Button>
                     <Button
                       size="icon"
-                      variant="ghost"
+                      variant="destructive-ghost"
                       aria-label={`Delete ${u.username}`}
                       disabled={u.username === me?.username}
                       onClick={() => setDeleting(u)}

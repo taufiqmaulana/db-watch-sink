@@ -9,9 +9,9 @@ import { Card, CardHeader, Empty, PageHeader, Spinner, Table, Td, Th } from "@/c
 import { cn, formatDuration, formatNumber, formatRelative } from "@/lib/format";
 import { useJobActions } from "./jobs/actions";
 
-function Tile({ label, value, note, tone }: { label: string; value: ReactNode; note?: ReactNode; tone?: "warning" | "critical" }) {
-  return (
-    <Card className="p-4">
+function Tile({ label, value, note, tone, to }: { label: string; value: ReactNode; note?: ReactNode; tone?: "warning" | "critical"; to?: string }) {
+  const card = (
+    <Card className={cn("h-full p-4", to && "transition-colors hover:border-primary/50 hover:bg-muted/40")}>
       <p className="text-sm text-muted-foreground">{label}</p>
       <p
         className={cn(
@@ -26,6 +26,13 @@ function Tile({ label, value, note, tone }: { label: string; value: ReactNode; n
       </p>
       {note && <p className="mt-0.5 text-xs text-muted-foreground">{note}</p>}
     </Card>
+  );
+  return to ? (
+    <Link to={to} className="rounded-lg">
+      {card}
+    </Link>
+  ) : (
+    card
   );
 }
 
@@ -42,9 +49,14 @@ export function DashboardPage() {
       <ErrorAlert error={overview.error ?? jobs.error} />
       {o && (
         <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-6">
-          <Tile label="Active jobs" value={formatNumber(o.active)} note={`${o.jobs} total, ${o.paused} paused`} />
+          <Tile label="Active jobs" value={formatNumber(o.active)} note={`${o.jobs} total, ${o.paused} paused`} to="/jobs?status=ACTIVE" />
           <Tile label="Running now" value={formatNumber(o.running)} />
-          <Tile label="Needs review" value={formatNumber(o.needsReview)} tone={o.needsReview > 0 ? "warning" : undefined} />
+          <Tile
+            label="Needs review"
+            value={formatNumber(o.needsReview)}
+            tone={o.needsReview > 0 ? "warning" : undefined}
+            to={o.needsReview > 0 ? "/jobs?status=NEEDS_REVIEW" : undefined}
+          />
           <Tile label="Failing" value={formatNumber(o.failing)} note="Last run failed" tone={o.failing > 0 ? "critical" : undefined} />
           <Tile label="Runs (24 h)" value={formatNumber(o.runs24h)} note={`${o.failedRuns24h} failed`} />
           <Tile label="Rows changed (24 h)" value={formatNumber(o.rowsChanged24h)} note="Upserts and deletes" />

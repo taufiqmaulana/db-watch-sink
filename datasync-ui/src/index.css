@@ -75,4 +75,10 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
+  /* Keyboard focus on plain links and buttons; styled controls set their own ring. */
+  :where(a, button, summary, [role="tab"]):focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 0.25rem;
+  }
 }

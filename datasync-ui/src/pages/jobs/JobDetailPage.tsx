@@ -66,7 +66,7 @@ export function JobDetailPage() {
                 <Button variant="outline" onClick={() => navigate(`/jobs/${j.id}/edit`)}>
                   <Pencil aria-hidden /> Edit
                 </Button>
-                <Button variant="outline" disabled={j.running} onClick={() => setConfirm("delete")}>
+                <Button variant="destructive-outline" disabled={j.running} onClick={() => setConfirm("delete")}>
                   <Trash2 aria-hidden /> Delete
                 </Button>
               </>
@@ -87,7 +87,7 @@ export function JobDetailPage() {
             </div>
           </div>
           {canOperate && (
-            <Button variant="outline" disabled={j.running} onClick={() => setConfirm("deletes")}>
+            <Button variant="destructive-outline" disabled={j.running} onClick={() => setConfirm("deletes")}>
               Apply deletes
             </Button>
           )}

@@ -1,14 +1,14 @@
 import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { HashRouter, Route, Routes } from "react-router-dom";
+import { HashRouter, Link, Route, Routes } from "react-router-dom";
 import { ApiError } from "./api/client";
 import { useLiveUpdates } from "./api/live";
 import { keys, useMe } from "./api/queries";
 import { AppLayout } from "./components/AppLayout";
 import { ErrorAlert } from "./components/ErrorAlert";
 import { Toaster } from "./components/Toaster";
-import { Spinner } from "./components/ui/layout";
+import { Empty, Spinner, useDocumentTitle } from "./components/ui/layout";
 import "./index.css";
 import { ForcedPasswordChangePage, LoginPage } from "./pages/AuthPages";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
@@ -31,6 +31,18 @@ const queryClient = new QueryClient({
   },
 });
 
+function NotFound() {
+  useDocumentTitle("Page not found");
+  return (
+    <Empty title="Page not found">
+      The link may be out of date.{" "}
+      <Link className="text-primary hover:underline" to="/">
+        Go to the dashboard
+      </Link>
+    </Empty>
+  );
+}
+
 function SignedIn() {
   useLiveUpdates();
   return (
@@ -43,7 +55,7 @@ function SignedIn() {
         <Route path="/jobs/:id/edit" element={<JobWizardPage />} />
         <Route path="/connections" element={<ConnectionsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
-        <Route path="*" element={<p className="text-sm text-muted-foreground">Page not found.</p>} />
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </AppLayout>
   );

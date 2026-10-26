@@ -221,7 +221,7 @@ export function ConnectionsPage() {
                             <Button size="icon" variant="ghost" aria-label={`Edit ${c.name}`} onClick={() => setEditing(c)}>
                               <Pencil />
                             </Button>
-                            <Button size="icon" variant="ghost" aria-label={`Delete ${c.name}`} onClick={() => setDeleting(c)}>
+                            <Button size="icon" variant="destructive-ghost" aria-label={`Delete ${c.name}`} onClick={() => setDeleting(c)}>
                               <Trash2 />
                             </Button>
                           </>
