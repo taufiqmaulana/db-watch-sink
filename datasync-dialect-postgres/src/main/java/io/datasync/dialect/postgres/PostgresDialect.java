@@ -42,6 +42,8 @@ public final class PostgresDialect implements SqlDialect {
             case "bytea" -> CanonicalType.of(Kind.BYTES);
             case "json", "jsonb" -> CanonicalType.of(Kind.JSON);
             case "uuid" -> CanonicalType.of(Kind.UUID);
+            // keep a declared length so other vendors can create a bounded column; text reports Integer.MAX_VALUE
+            case "varchar", "bpchar" -> new CanonicalType(Kind.STRING, col.size() < Integer.MAX_VALUE ? col.size() : 0, 0);
             default -> CanonicalType.of(Kind.STRING);
         };
     }

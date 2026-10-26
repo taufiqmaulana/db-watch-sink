@@ -38,7 +38,24 @@ class OracleDialectTest {
         assertThat(type("DATE", 7, null)).isEqualTo(new CanonicalType(Kind.TIMESTAMP, 0, 0));
         assertThat(type("TIMESTAMP(6)", 11, 6)).isEqualTo(new CanonicalType(Kind.TIMESTAMP, 6, 0));
         assertThat(type("TIMESTAMP(6) WITH TIME ZONE", 13, 6)).isEqualTo(CanonicalType.of(Kind.TIMESTAMP_TZ));
-        assertThat(type("VARCHAR2", 100, null)).isEqualTo(CanonicalType.of(Kind.STRING));
+        assertThat(type("VARCHAR2", 100, null)).isEqualTo(new CanonicalType(Kind.STRING, 100, 0));
+    }
+
+    @Test
+    void mergesFromStagingAndNeverUpdatesKeys() {
+        assertThat(dialect.upsertSql(ObjectRef.parse("HR.T"), "\"DS_STG_1\"", List.of("ID", "NAME"), List.of("ID"))).isEqualTo(
+            "MERGE INTO \"HR\".\"T\" t USING \"DS_STG_1\" s ON (t.\"ID\" = s.\"ID\")"
+                + " WHEN MATCHED THEN UPDATE SET t.\"NAME\" = s.\"NAME\""
+                + " WHEN NOT MATCHED THEN INSERT (\"ID\", \"NAME\") VALUES (s.\"ID\", s.\"NAME\")");
+    }
+
+    @Test
+    void boundedTextIsVarchar2AndUnboundedTextIsClobExceptAsKey() {
+        assertThat(dialect.nativeType(new CanonicalType(Kind.STRING, 50, 0))).isEqualTo("VARCHAR2(50 CHAR)");
+        assertThat(dialect.nativeType(CanonicalType.of(Kind.STRING))).isEqualTo("CLOB");
+        assertThat(dialect.nativeKeyType(CanonicalType.of(Kind.STRING))).isEqualTo("VARCHAR2(4000)");
+        assertThat(OracleStagingLoader.stagingName(ObjectRef.parse("HR.A_VERY_LONG_TABLE_NAME_INDEED"), List.of("ID")))
+            .hasSizeLessThanOrEqualTo(30).isEqualTo(OracleStagingLoader.stagingName(ObjectRef.parse("HR.A_VERY_LONG_TABLE_NAME_INDEED"), List.of("ID")));
     }
 
     @Test

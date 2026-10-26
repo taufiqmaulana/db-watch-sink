@@ -87,6 +87,10 @@ final class JdbcSink implements Sink {
             Set<String> found = existing;
             List<String> missing = writeCols.stream().filter(col -> !found.contains(col)).toList();
             if (!missing.isEmpty()) throw new IllegalStateException("target " + target + " is missing columns " + missing);
+            BulkLoader loader = dialect.bulkLoader();
+            loader.prepare(c, target, writeCols);
+            if (deleteMode != DeleteMode.IGNORE) loader.prepare(c, target, keyCols);
+            c.commit();
         } catch (SQLException e) {
             throw new IllegalStateException("init of sink " + ctx.sinkId() + " failed", e);
         }
@@ -167,13 +171,20 @@ final class JdbcSink implements Sink {
     private void create(Connection c, List<Column> columns) throws SQLException {
         List<String> defs = new ArrayList<>();
         for (Column col : columns) {
-            defs.add(dialect.quote(dialect.normalizeIdentifier(col.name())) + " " + dialect.nativeType(col.type())
-                + (col.nullable() ? "" : " NOT NULL"));
+            String name = dialect.normalizeIdentifier(col.name());
+            boolean key = keyCols.contains(name);
+            boolean text = col.type().kind() == CanonicalType.Kind.STRING || col.type().kind() == CanonicalType.Kind.JSON;
+            // where '' is stored as NULL, a NOT NULL text column would reject empty strings from the source
+            boolean notNull = key || !col.nullable() && !(text && dialect.emptyStringIsNull());
+            defs.add(dialect.quote(name) + " " + (key ? dialect.nativeKeyType(col.type()) : dialect.nativeType(col.type()))
+                + (notNull ? " NOT NULL" : ""));
         }
         if (deleteMode == DeleteMode.SOFT) {
+            String flag = dialect.quote(isDeleted);
             defs.add(dialect.quote(deletedAt) + " " + dialect.nativeType(CanonicalType.of(CanonicalType.Kind.TIMESTAMP_TZ)));
-            defs.add(dialect.quote(isDeleted) + " " + dialect.nativeType(CanonicalType.of(CanonicalType.Kind.BOOLEAN))
-                + " DEFAULT " + dialect.booleanLiteral(false) + " NOT NULL");
+            defs.add(flag + " " + dialect.nativeType(CanonicalType.of(CanonicalType.Kind.BOOLEAN))
+                + " DEFAULT " + dialect.booleanLiteral(false) + " NOT NULL"
+                + " CHECK (" + flag + " IN (" + dialect.booleanLiteral(true) + ", " + dialect.booleanLiteral(false) + "))");
         }
         defs.add("PRIMARY KEY (" + keyCols.stream().map(dialect::quote).collect(Collectors.joining(", ")) + ")");
 

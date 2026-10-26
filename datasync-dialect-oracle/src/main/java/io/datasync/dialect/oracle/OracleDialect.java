@@ -10,9 +10,16 @@ import io.datasync.jdbc.SqlDialect;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
-/** Oracle 11g and later. Source side only for now; the sink side (MERGE, array-bound staging) arrives in M5. */
+/** Oracle 11g and later, as a source and as a sink (staging in a global temporary table, then MERGE). */
 public final class OracleDialect implements SqlDialect {
+
+    /** The largest VARCHAR2 without MAX_STRING_SIZE=EXTENDED. */
+    private static final int MAX_VARCHAR = 4000;
+
+    private final BulkLoader loader = new OracleStagingLoader(this);
 
     @Override
     public String vendor() {
@@ -44,6 +51,7 @@ public final class OracleDialect implements SqlDialect {
             case "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE" -> CanonicalType.of(Kind.FLOAT64);
             case "BLOB", "RAW", "LONG RAW" -> CanonicalType.of(Kind.BYTES);
             case "JSON" -> CanonicalType.of(Kind.JSON);
+            case "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR" -> new CanonicalType(Kind.STRING, col.size(), 0);
             default -> CanonicalType.of(Kind.STRING);
         };
     }
@@ -64,7 +72,8 @@ public final class OracleDialect implements SqlDialect {
             case INT64 -> "NUMBER(19)";
             case DECIMAL -> t.precision() == 0 ? "NUMBER" : "NUMBER(" + t.precision() + "," + t.scale() + ")";
             case FLOAT64 -> "BINARY_DOUBLE";
-            case STRING, JSON -> "CLOB";
+            case STRING -> t.precision() > 0 && t.precision() <= MAX_VARCHAR ? "VARCHAR2(" + t.precision() + " CHAR)" : "CLOB";
+            case JSON -> "CLOB";
             case DATE -> "DATE";
             case TIMESTAMP -> "TIMESTAMP(" + t.precision() + ")";
             case TIMESTAMP_TZ -> "TIMESTAMP WITH TIME ZONE";
@@ -73,6 +82,19 @@ public final class OracleDialect implements SqlDialect {
         };
     }
 
+    /** A LOB cannot be a primary key, so unbounded text keys get the largest VARCHAR2 instead. */
+    @Override
+    public String nativeKeyType(CanonicalType t) {
+        String type = nativeType(t);
+        return type.equals("CLOB") ? "VARCHAR2(" + MAX_VARCHAR + ")" : type;
+    }
+
+    @Override
+    public boolean emptyStringIsNull() {
+        return true;
+    }
+
+    /** Booleans are CHAR(1) holding 'Y' or 'N' (design decision 11). */
     @Override
     public String booleanLiteral(boolean value) {
         return value ? "'Y'" : "'N'";
@@ -85,11 +107,18 @@ public final class OracleDialect implements SqlDialect {
 
     @Override
     public String upsertSql(ObjectRef target, String staging, List<String> cols, List<String> keys) {
-        throw new UnsupportedOperationException("Oracle as a sink is planned for M5");
+        Function<String, String> source = c -> "s." + quote(c);
+        String on = keys.stream().map(k -> "t." + quote(k) + " = " + source.apply(k)).collect(Collectors.joining(" AND "));
+        String updates = cols.stream().filter(c -> !keys.contains(c))
+            .map(c -> "t." + quote(c) + " = " + source.apply(c)).collect(Collectors.joining(", "));
+        return "MERGE INTO " + qualify(target) + " t USING " + staging + " s ON (" + on + ")"
+            + (updates.isEmpty() ? "" : " WHEN MATCHED THEN UPDATE SET " + updates)
+            + " WHEN NOT MATCHED THEN INSERT (" + cols.stream().map(this::quote).collect(Collectors.joining(", ")) + ")"
+            + " VALUES (" + cols.stream().map(source).collect(Collectors.joining(", ")) + ")";
     }
 
     @Override
     public BulkLoader bulkLoader() {
-        throw new UnsupportedOperationException("Oracle as a sink is planned for M5");
+        return loader;
     }
 }

@@ -15,7 +15,7 @@ The full design is in [Design.md](Design.md).
 | M4: REST API and management UI | Done |
 | M2: watermark mode and scheduler | Not started. Jobs run only when started with **Run now** or the CLI |
 | M3: webhook sink, retries and dead letters | Not started |
-| M5: Oracle as a sink | Not started |
+| M5: Oracle as a sink (MERGE from a global temporary table; Oracle 11g and later) | Done |
 | M6 to M8: outbox and multi-sink fan-out, hardening, transformations | Not started |
 
 ## Requirements
@@ -146,7 +146,7 @@ cd datasync-ui && npm run gen:api
 datasync-api/               SPI interfaces and the canonical data model (no dependencies)
 datasync-core/              engine: config, snapshot diff, hash index, SQLite state store and migrations
 datasync-jdbc/              generic JDBC source and sink, dialect SPI
-datasync-dialect-oracle/    Oracle dialect (source side)
+datasync-dialect-oracle/    Oracle dialect (source and sink, 11g and later)
 datasync-dialect-postgres/  PostgreSQL dialect (source and sink, COPY-based loading)
 datasync-cli/               YAML-driven command-line runner
 datasync-server/            Quarkus app: REST API, sessions and roles, run executor, live events (SSE)

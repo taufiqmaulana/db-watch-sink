@@ -21,6 +21,16 @@ public interface SqlDialect {
 
     String nativeType(CanonicalType t);
 
+    /** The type of a primary-key column, for vendors that cannot index every type (Oracle LOBs). */
+    default String nativeKeyType(CanonicalType t) {
+        return nativeType(t);
+    }
+
+    /** True when the vendor stores '' as NULL (Oracle), so created string columns must stay nullable. */
+    default boolean emptyStringIsNull() {
+        return false;
+    }
+
     String booleanLiteral(boolean value);
 
     String currentTimeSql();
