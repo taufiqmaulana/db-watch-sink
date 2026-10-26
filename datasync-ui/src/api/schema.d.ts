@@ -763,6 +763,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{id}/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reconcile */
+        post: {
+            parameters: {
+                query?: {
+                    allowDeletes?: boolean;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobView"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{id}/resume": {
         parameters: {
             query?: never;
@@ -1194,6 +1234,8 @@ export interface components {
             fixedDelay: boolean;
             /** Format: int32 */
             jitterPercent: number;
+            watermark: components["schemas"]["WatermarkDef"];
+            reconcile: components["schemas"]["ReconcileDef"];
         };
         JobInput: {
             config: components["schemas"]["JobDef"];
@@ -1209,6 +1251,8 @@ export interface components {
             running: boolean;
             lastRun: components["schemas"]["RunView"] | null;
             nextRunAt: ((string | components["schemas"]["Instant"] | null) | null) | components["schemas"]["Instant"] | null;
+            nextReconcileAt: ((string | components["schemas"]["Instant"] | null) | null) | components["schemas"]["Instant"] | null;
+            watermarkValue: string | null;
             config: components["schemas"]["JobDef"];
             createdAt: components["schemas"]["Instant"];
             updatedAt: components["schemas"]["Instant"];
@@ -1266,6 +1310,9 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        ReconcileDef: {
+            cron: string;
+        };
         /** @enum {string} */
         Role: "VIEWER" | "OPERATOR" | "ADMIN";
         /** @enum {string} */
@@ -1309,6 +1356,10 @@ export interface components {
             mustChangePassword: boolean;
             createdAt: components["schemas"]["Instant"];
             updatedAt: components["schemas"]["Instant"];
+        };
+        WatermarkDef: {
+            column: string;
+            overlap: string;
         };
     };
     responses: never;

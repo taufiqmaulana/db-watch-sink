@@ -11,9 +11,12 @@ export function useJobActions() {
     queryClient.invalidateQueries({ queryKey: keys.jobs });
     queryClient.invalidateQueries({ queryKey: keys.overview });
   };
+  /** A regular run, or with {@code reconcile} a full comparison (the only run that applies deletes in watermark modes). */
   const run = useMutation({
-    mutationFn: ({ job, allowDeletes = false }: { job: JobView; allowDeletes?: boolean }) =>
-      call(api.POST("/api/v1/jobs/{id}/run", { params: { path: { id: job.id }, query: { allowDeletes } } })),
+    mutationFn: ({ job, allowDeletes = false, reconcile = false }: { job: JobView; allowDeletes?: boolean; reconcile?: boolean }) =>
+      reconcile
+        ? call(api.POST("/api/v1/jobs/{id}/reconcile", { params: { path: { id: job.id }, query: { allowDeletes } } }))
+        : call(api.POST("/api/v1/jobs/{id}/run", { params: { path: { id: job.id }, query: { allowDeletes } } })),
     onSuccess: refresh,
     onError: toast.error,
   });

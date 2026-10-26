@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Pause, Pencil, Play, Trash2 } from "lucide-react";
+import { AlertTriangle, Pause, Pencil, Play, RefreshCw, Trash2 } from "lucide-react";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, call, type JobView, type RunView } from "@/api/client";
@@ -15,7 +15,7 @@ import { Tabs } from "@/components/ui/tabs";
 import { formatDateTime, formatDuration, formatNumber, formatRelative } from "@/lib/format";
 import { toYaml } from "@/lib/yaml";
 import { nextRunLabel, useConnectionNames, useJobActions } from "./actions";
-import { describeSchedule } from "./jobForm";
+import { describeMode, describeSchedule } from "./jobForm";
 
 // Recharts is large; load it only when a job page shows the chart
 const RunsChart = lazy(() => import("./RunsChart"));
@@ -28,7 +28,7 @@ export function JobDetailPage() {
   const { run, setPaused } = useJobActions();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [confirm, setConfirm] = useState<"deletes" | "delete" | null>(null);
+  const [confirm, setConfirm] = useState<"deletes" | "delete" | "reconcile" | null>(null);
   const remove = useMutation({
     mutationFn: () => call(api.DELETE("/api/v1/jobs/{id}", { params: { path: { id } } })),
     onSuccess: () => {
@@ -43,6 +43,8 @@ export function JobDetailPage() {
   if (job.error) return <ErrorAlert error={job.error} />;
   const j = job.data;
   const review = j.status === "NEEDS_REVIEW";
+  // in watermark modes only a reconcile reads the whole source, so only it can find and apply deletes
+  const incremental = j.config.mode !== "SNAPSHOT_DIFF";
 
   return (
     <>
@@ -56,6 +58,11 @@ export function JobDetailPage() {
                 <Button disabled={j.running} loading={run.isPending} onClick={() => run.mutate({ job: j })}>
                   <Play aria-hidden /> Run now
                 </Button>
+                {incremental && (
+                  <Button variant="outline" disabled={j.running} onClick={() => setConfirm("reconcile")}>
+                    <RefreshCw aria-hidden /> Reconcile
+                  </Button>
+                )}
                 <Button variant="outline" loading={setPaused.isPending} onClick={() => setPaused.mutate({ job: j, paused: j.status !== "PAUSED" })}>
                   {j.status === "PAUSED" ? <Play aria-hidden /> : <Pause aria-hidden />}
                   {j.status === "PAUSED" ? "Resume" : "Pause"}
@@ -122,11 +129,20 @@ export function JobDetailPage() {
         open={confirm === "deletes"}
         onOpenChange={(o) => !o && setConfirm(null)}
         title="Apply deletes?"
-        effect={`This runs ${j.name} with the delete guard turned off. Every key missing from the source is deleted in every sink (soft or hard, as each sink is configured).`}
+        effect={`This ${incremental ? "reconciles" : "runs"} ${j.name} with the delete guard turned off. Every key missing from the source is deleted in every sink (soft or hard, as each sink is configured).`}
         confirmLabel="Run and apply deletes"
         destructive
         loading={run.isPending}
-        onConfirm={() => run.mutate({ job: j, allowDeletes: true }, { onSettled: () => setConfirm(null) })}
+        onConfirm={() => run.mutate({ job: j, allowDeletes: true, reconcile: incremental }, { onSettled: () => setConfirm(null) })}
+      />
+      <ConfirmDialog
+        open={confirm === "reconcile"}
+        onOpenChange={(o) => !o && setConfirm(null)}
+        title="Reconcile now?"
+        effect={`Reads the whole of ${j.config.source.object} and compares it with every sink: it fixes changes the watermark missed and applies rows deleted at the source. On a large table this takes as long as a full load. The delete guard still applies.`}
+        confirmLabel="Reconcile"
+        loading={run.isPending}
+        onConfirm={() => run.mutate({ job: j, reconcile: true }, { onSettled: () => setConfirm(null) })}
       />
       <ConfirmDialog
         open={confirm === "delete"}
@@ -168,7 +184,7 @@ function Overview({ job, runs }: { job: JobView; runs: RunView[] }) {
       <Card>
         <CardHeader title="Last run" />
         <dl className="grid grid-cols-2 gap-4 p-5">
-          <Stat label="Result">
+          <Stat label={last?.kind === "RECONCILE" ? "Result (reconcile)" : "Result"}>
             <RunStateBadge run={last} />
           </Stat>
           <Stat label="Started">{last ? formatRelative(last.startedAt) : "—"}</Stat>
@@ -177,6 +193,7 @@ function Overview({ job, runs }: { job: JobView; runs: RunView[] }) {
           <Stat label="Upserts">{last ? formatNumber(last.upserts) : "—"}</Stat>
           <Stat label="Deletes">{last ? formatNumber(last.deletes) : "—"}</Stat>
           <Stat label="Next run">{nextRunLabel(job)}</Stat>
+          {c.mode === "HYBRID" && <Stat label="Next reconcile">{job.nextReconcileAt ? formatRelative(job.nextReconcileAt) : "—"}</Stat>}
         </dl>
         {last?.error && last.state === "FAILED" && (
           <div className="px-5 pb-5">
@@ -199,7 +216,14 @@ function Overview({ job, runs }: { job: JobView; runs: RunView[] }) {
             ))}
           </Stat>
           <Stat label="Schedule">{describeSchedule(c)}</Stat>
-          <Stat label="Change detection">Snapshot diff, batches of {formatNumber(c.batchSize)}</Stat>
+          <Stat label="Change detection">
+            {describeMode(c)}; batches of {formatNumber(c.batchSize)}
+          </Stat>
+          {c.mode !== "SNAPSHOT_DIFF" && (
+            <Stat label="Watermark reached">
+              {job.watermarkValue ? <span className="font-mono text-xs">{job.watermarkValue}</span> : "None yet: the next run reads everything"}
+            </Stat>
+          )}
           <Stat label="Delete guard">Stop above {c.maxDeletePercent}% deleted</Stat>
         </dl>
       </Card>
@@ -233,6 +257,7 @@ function RunsTable({ runs, error }: { runs?: RunView[]; error: unknown }) {
                 <Td className="whitespace-nowrap">{formatDateTime(r.startedAt)}</Td>
                 <Td>
                   <RunStateBadge run={r} />
+                  {r.kind === "RECONCILE" && <p className="text-xs text-muted-foreground">Reconcile</p>}
                   {r.error && (
                     <details className="mt-1 max-w-md text-xs">
                       <summary className="cursor-pointer text-muted-foreground">Details</summary>

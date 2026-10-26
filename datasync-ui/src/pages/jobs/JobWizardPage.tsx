@@ -12,8 +12,8 @@ import { toast } from "@/components/Toaster";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, Input, Select } from "@/components/ui/form";
 import { Card, PageHeader, Spinner, Table, Td, Th } from "@/components/ui/layout";
-import { cn } from "@/lib/format";
-import { columnRows, emptyJob, fromJobDef, jobSchema, newSink, toJobDef, typeLabel, type JobFormValues } from "./jobForm";
+import { cn, formatNumber } from "@/lib/format";
+import { columnRows, emptyJob, fromJobDef, jobSchema, modeProblems, newSink, toJobDef, typeLabel, WATERMARK_KINDS, type JobFormValues } from "./jobForm";
 
 type Form = UseFormReturn<JobFormValues>;
 
@@ -21,8 +21,11 @@ const STEPS: { title: string; fields: (keyof JobFormValues)[] }[] = [
   { title: "Source", fields: ["name", "sourceConnection", "sourceObject"] },
   { title: "Columns", fields: ["columns"] },
   {
-    title: "Schedule",
-    fields: ["scheduleKind", "every", "cron", "jitterPercent", "batchSize", "fetchSize", "queryTimeoutSeconds", "maxDeletePercent"],
+    title: "Detection & schedule",
+    fields: [
+      ...["mode", "watermarkColumn", "overlap", "reconcileCron"] as const,
+      ...["scheduleKind", "every", "cron", "jitterPercent", "batchSize", "fetchSize", "queryTimeoutSeconds", "maxDeletePercent"] as const,
+    ],
   },
   { title: "Sinks", fields: ["sinks"] },
   { title: "Dry run", fields: [] },
@@ -80,7 +83,11 @@ export function JobWizardPage() {
   if (id && existing.error) return <ErrorAlert error={existing.error} />;
 
   const next = async () => {
-    if (await form.trigger(STEPS[step].fields)) setStep(step + 1);
+    if (!(await form.trigger(STEPS[step].fields))) return;
+    // what a mode requires depends on the mode, so it is checked here rather than in the schema
+    const problems = step === 2 ? modeProblems(form.getValues()) : [];
+    problems.forEach((p) => form.setError(p.field, { message: p.message }));
+    if (problems.length === 0) setStep(step + 1);
   };
   const leave = () => navigate(existing.data ? `/jobs/${existing.data.id}` : "/jobs");
 
@@ -120,7 +127,7 @@ export function JobWizardPage() {
       <Card className="p-5">
         {step === 0 && <SourceStep form={form} />}
         {step === 1 && <ColumnsStep form={form} saved={existing.data?.config} />}
-        {step === 2 && <DetectionStep form={form} />}
+        {step === 2 && <DetectionStep form={form} lastRowsRead={existing.data?.lastRun?.rowsRead} />}
         {step === 3 && <SinksStep form={form} />}
         {step === 4 && <DryRunStep form={form} preview={preview} saveError={save.error} />}
         <div className="mt-6 flex justify-between gap-2 border-t border-border pt-5">
@@ -310,13 +317,86 @@ function ColumnsStep({ form, saved }: { form: Form; saved?: JobDef }) {
   );
 }
 
-function DetectionStep({ form }: { form: Form }) {
+const MODES: { value: JobFormValues["mode"]; label: string; description: string }[] = [
+  {
+    value: "SNAPSHOT_DIFF",
+    label: "Snapshot diff",
+    description: "Reads the whole source every run and detects deletes. Needs no update column. Suits tables up to a few hundred thousand rows.",
+  },
+  {
+    value: "WATERMARK",
+    label: "Watermark",
+    description: "Reads only rows changed since the last run, using an update time or an increasing id. Does not detect deletes.",
+  },
+  {
+    value: "HYBRID",
+    label: "Hybrid",
+    description: "Watermark runs on the schedule below, plus a full comparison on its own schedule that catches missed changes and applies deletes.",
+  },
+];
+
+/** Above this many rows a full read every run gets heavy (design 5). */
+const LARGE_TABLE_ROWS = 100_000;
+
+function DetectionStep({ form, lastRowsRead }: { form: Form; lastRowsRead?: number }) {
   const { errors } = form.formState;
   const number = (name: "batchSize" | "fetchSize" | "queryTimeoutSeconds" | "maxDeletePercent" | "jitterPercent") =>
     form.register(name, { valueAsNumber: true });
-  const kind = form.watch("scheduleKind");
+  const [kind, mode, columns] = form.watch(["scheduleKind", "mode", "columns"]);
+  const candidates = columns.filter((c) => WATERMARK_KINDS.includes(c.kind));
   return (
     <div className="grid max-w-2xl gap-5">
+      <fieldset className="grid gap-4">
+        <legend className="mb-3 text-sm font-semibold">Change detection</legend>
+        <div className="grid gap-2">
+          {MODES.map((m) => (
+            <label key={m.value} className="flex items-start gap-2.5 rounded-md border border-border p-3 text-sm has-[:checked]:border-primary">
+              <input type="radio" value={m.value} className="mt-0.5 accent-primary" {...form.register("mode")} />
+              <span>
+                <span className="font-medium">{m.label}</span>
+                <span className="mt-0.5 block text-muted-foreground">{m.description}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        {mode === "SNAPSHOT_DIFF" && lastRowsRead !== undefined && lastRowsRead > LARGE_TABLE_ROWS && (
+          <p className="text-sm text-muted-foreground">
+            The last run read {formatNumber(lastRowsRead)} rows. At this size, Hybrid keeps regular runs light.
+          </p>
+        )}
+        {mode !== "SNAPSHOT_DIFF" && (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="Watermark column"
+              hint={candidates.length ? "An update time or an increasing id, set on every insert and update." : "The source has no date, time or number column."}
+              error={errors.watermarkColumn?.message}
+            >
+              {(id) => (
+                <Select id={id} {...form.register("watermarkColumn", { onChange: () => form.clearErrors("watermarkColumn") })}>
+                  <option value="">Choose…</option>
+                  {candidates.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name} ({c.type})
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field label="Overlap" hint="Re-read this far back each run to catch late commits. Time columns only." error={errors.overlap?.message}>
+              {(id) => <Input id={id} className="w-28 font-mono" {...form.register("overlap")} />}
+            </Field>
+          </div>
+        )}
+        {mode === "HYBRID" && (
+          <Field
+            label="Reconcile schedule (cron)"
+            hint="When to compare the whole source, which also applies deletes. 0 2 * * * is daily at 02:00."
+            error={errors.reconcileCron?.message}
+          >
+            {(id) => <Input id={id} className="w-56 font-mono" {...form.register("reconcileCron", { onChange: () => form.clearErrors("reconcileCron") })} />}
+          </Field>
+        )}
+      </fieldset>
       <fieldset className="grid gap-4">
         <legend className="mb-3 text-sm font-semibold">Schedule</legend>
         <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
@@ -359,12 +439,6 @@ function DetectionStep({ form }: { form: Form }) {
           Only active jobs run on schedule, and a run is skipped while the previous one is still going. Run now works at any time.
         </p>
       </fieldset>
-      <div className="rounded-md bg-muted px-4 py-3 text-sm">
-        <p className="font-medium">Snapshot diff</p>
-        <p className="mt-0.5 text-muted-foreground">
-          Each run reads the whole source and compares it with the last run, so it needs no update timestamp and detects deletes.
-        </p>
-      </div>
       <Field
         label="Delete guard (%)"
         hint="Stop and ask for review when a run would delete more than this share of rows. Protects against a failed or partial source read."

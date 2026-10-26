@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ObjectSchema } from "@/api/client";
-import { columnRows, describeSchedule, emptyJob, fromJobDef, intervalSeconds, newSink, toJobDef } from "./jobForm";
+import { columnRows, describeMode, describeSchedule, emptyJob, fromJobDef, intervalSeconds, modeProblems, newSink, toJobDef } from "./jobForm";
 
 const schema: ObjectSchema = {
   ref: { schema: "HR", name: "CUSTOMERS" },
@@ -21,6 +21,21 @@ describe("job form", () => {
     expect(fromJobDef(def)).toMatchObject({ scheduleKind: "cron", cron: "0 2 * * *", every: "5m" });
     expect(describeSchedule(def)).toBe("Cron 0 2 * * *");
     expect(intervalSeconds("2h")).toBe(7200);
+  });
+
+  it("writes the watermark and reconcile only for the modes that use them", () => {
+    const base = { ...emptyJob, name: "j", sourceConnection: "c1", sourceObject: "T", columns: columnRows(schema), watermarkColumn: "ID" };
+    const snapshot = toJobDef(base);
+    expect(snapshot).toMatchObject({ mode: "SNAPSHOT_DIFF", watermark: { column: "" }, reconcile: { cron: "" } });
+
+    const hybrid = toJobDef({ ...base, mode: "HYBRID", overlap: "2m" });
+    expect(hybrid).toMatchObject({ watermark: { column: "ID", overlap: "2m" }, reconcile: { cron: "0 2 * * *" } });
+    expect(fromJobDef(hybrid)).toMatchObject({ mode: "HYBRID", watermarkColumn: "ID", reconcileCron: "0 2 * * *" });
+    expect(describeMode(hybrid)).toBe("Hybrid: watermark on ID, 2m overlap, reconcile 0 2 * * *");
+
+    expect(modeProblems({ mode: "WATERMARK", watermarkColumn: "", reconcileCron: "" })).toEqual([
+      { field: "watermarkColumn", message: "Choose a watermark column" },
+    ]);
     expect(intervalSeconds("soon")).toBeNull();
   });
 

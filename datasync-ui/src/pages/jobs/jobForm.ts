@@ -24,6 +24,9 @@ const sinkSchema = z.object({
   softDeleteFlagColumn: z.string().trim().min(1, "Required"),
 });
 
+const CRON_HINT = "Use five fields: minute hour day month weekday";
+const isCron = (s: string) => /^\S+(\s+\S+){4}$/.test(s.trim());
+
 export const jobSchema = z.object({
   name: z.string().trim().min(1, "Name is required"),
   sourceConnection: z.string().min(1, "Choose a source connection"),
@@ -41,10 +44,32 @@ export const jobSchema = z.object({
   sinks: z.array(sinkSchema).min(1, "Add at least one sink"),
   scheduleKind: z.enum(["interval", "cron"]),
   every: z.string().refine((s) => !s.trim() || (intervalSeconds(s) ?? 0) >= 10, "Use a number with s, m or h, at least 10s"),
-  cron: z.string().refine((s) => !s.trim() || /^\S+(\s+\S+){4}$/.test(s.trim()), "Use five fields: minute hour day month weekday"),
+  cron: z.string().refine((s) => !s.trim() || isCron(s), CRON_HINT),
   fixedDelay: z.boolean(),
   jitterPercent: count(0, 50),
+  mode: z.enum(["SNAPSHOT_DIFF", "WATERMARK", "HYBRID"]),
+  watermarkColumn: z.string(),
+  overlap: z.string().refine((s) => !s.trim() || intervalSeconds(s) !== null, "Use a number with s, m or h"),
+  reconcileCron: z.string().refine((s) => !s.trim() || isCron(s), CRON_HINT),
 });
+
+/** Column types a watermark can be read from: an update time or an increasing number. */
+export const WATERMARK_KINDS = ["DATE", "TIMESTAMP", "TIMESTAMP_TZ", "INT32", "INT64", "DECIMAL"];
+
+/** What the chosen mode still needs; checked by the wizard because the requirement depends on the mode. */
+export function modeProblems(v: Pick<JobFormValues, "mode" | "watermarkColumn" | "reconcileCron">) {
+  const problems: { field: "watermarkColumn" | "reconcileCron"; message: string }[] = [];
+  if (v.mode !== "SNAPSHOT_DIFF" && !v.watermarkColumn) problems.push({ field: "watermarkColumn", message: "Choose a watermark column" });
+  if (v.mode === "HYBRID" && !v.reconcileCron.trim()) problems.push({ field: "reconcileCron", message: "Enter when to reconcile" });
+  return problems;
+}
+
+/** "Snapshot diff", "Watermark on UPDATED_AT", "Hybrid: watermark on UPDATED_AT, reconcile 0 2 * * *". */
+export function describeMode(def: Pick<JobDef, "mode" | "watermark" | "reconcile">) {
+  if (def.mode === "SNAPSHOT_DIFF") return "Snapshot diff";
+  const watermark = `watermark on ${def.watermark.column}, ${def.watermark.overlap} overlap`;
+  return def.mode === "WATERMARK" ? `W${watermark.slice(1)}` : `Hybrid: ${watermark}, reconcile ${def.reconcile.cron}`;
+}
 
 /** Seconds in an interval such as "30s", "5m" or "2h", or null when it is not one. */
 export function intervalSeconds(text: string) {
@@ -88,6 +113,10 @@ export const emptyJob: JobFormValues = {
   cron: "*/5 * * * *",
   fixedDelay: false,
   jitterPercent: 10,
+  mode: "SNAPSHOT_DIFF",
+  watermarkColumn: "",
+  overlap: "5m",
+  reconcileCron: "0 2 * * *",
 };
 
 export function typeLabel(t: Schemas["CanonicalType"]) {
@@ -112,7 +141,10 @@ export function toJobDef(v: JobFormValues): JobDef {
         v.columns.filter((c) => selected(c) && c.rename.trim() && c.rename.trim() !== c.name).map((c) => [c.name, c.rename.trim()]),
       ),
     },
-    mode: "SNAPSHOT_DIFF",
+    mode: v.mode,
+    // an empty column or cron means "none"; the fields keep their values in the form while another mode is chosen
+    watermark: { column: v.mode === "SNAPSHOT_DIFF" ? "" : v.watermarkColumn, overlap: v.overlap.trim() || emptyJob.overlap },
+    reconcile: { cron: v.mode === "HYBRID" ? v.reconcileCron.trim() : "" },
     batchSize: v.batchSize,
     fetchSize: v.fetchSize,
     queryTimeoutSeconds: v.queryTimeoutSeconds,
@@ -150,6 +182,10 @@ export function fromJobDef(def: JobDef): JobFormValues {
     queryTimeoutSeconds: def.queryTimeoutSeconds,
     maxDeletePercent: def.maxDeletePercent,
     sinks,
+    mode: def.mode,
+    watermarkColumn: def.watermark.column ?? "",
+    overlap: def.watermark.overlap,
+    reconcileCron: def.reconcile.cron || emptyJob.reconcileCron,
     scheduleKind: def.every ? "interval" : "cron",
     every: def.every || emptyJob.every,
     cron: def.schedule,
