@@ -424,7 +424,7 @@ function DryRunStep({ form, preview, saveError }: { form: Form; preview: UseMuta
   useEffect(() => mutate(toJobDef(form.getValues())), [form, mutate]);
 
   return (
-    <div className="grid gap-5">
+    <div className="grid grid-cols-1 gap-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">Reads the first rows from the source with this configuration. Nothing is written.</p>
         <Button variant="outline" size="sm" loading={preview.isPending} onClick={() => mutate(toJobDef(form.getValues()))}>
@@ -464,28 +464,30 @@ function DryRunStep({ form, preview, saveError }: { form: Form; preview: UseMuta
             {preview.data.rows.length === 0 ? (
               <p className="text-sm text-muted-foreground">The source returned no rows.</p>
             ) : (
-              <Table>
-                <thead>
-                  <tr>
-                    {preview.data.columns.map((c) => (
-                      <Th key={c.target} className="font-mono">
-                        {c.target}
-                      </Th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.data.rows.map((row, r) => (
-                    <tr key={r}>
+              <div className="w-full overflow-x-auto">
+                <Table>
+                  <thead>
+                    <tr>
                       {preview.data.columns.map((c) => (
-                        <Td key={c.target} className="max-w-48 truncate font-mono text-xs">
-                          {renderValue((row as Record<string, unknown>)[c.target])}
-                        </Td>
+                        <Th key={c.target} className="font-mono">
+                          {c.target}
+                        </Th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </Table>
+                  </thead>
+                  <tbody>
+                    {preview.data.rows.map((row, r) => (
+                      <tr key={r}>
+                        {preview.data.columns.map((c) => (
+                          <Td key={c.target} className="max-w-48 truncate font-mono text-xs">
+                            {renderValue((row as Record<string, unknown>)[c.target])}
+                          </Td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </div>
             )}
           </section>
           <p className="text-sm text-muted-foreground">
