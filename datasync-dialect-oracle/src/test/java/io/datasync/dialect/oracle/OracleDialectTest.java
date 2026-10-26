@@ -2,16 +2,28 @@ package io.datasync.dialect.oracle;
 
 import io.datasync.api.CanonicalType;
 import io.datasync.api.CanonicalType.Kind;
+import io.datasync.api.ObjectRef;
+import io.datasync.api.ReadSpec;
 import io.datasync.jdbc.JdbcColumn;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Types;
+import java.time.Duration;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class OracleDialectTest {
 
     private final OracleDialect dialect = new OracleDialect();
+
+    @Test
+    void limitsChunksWithRownumSoPre12cVersionsWork() {
+        ReadSpec spec = new ReadSpec(ObjectRef.parse("HR.CUSTOMERS"), List.of("ID", "NAME"), List.of("ID"), 100, 500, Duration.ofSeconds(5));
+
+        assertThat(dialect.keysetQuery(spec, true)).isEqualTo(
+            "SELECT * FROM (SELECT \"ID\", \"NAME\" FROM \"HR\".\"CUSTOMERS\" WHERE (\"ID\" > ?) ORDER BY \"ID\") WHERE ROWNUM <= 500");
+    }
 
     @Test
     void mapsNumbersByPrecisionAndScale() {

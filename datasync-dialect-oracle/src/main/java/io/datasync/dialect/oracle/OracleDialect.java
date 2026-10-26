@@ -3,6 +3,7 @@ package io.datasync.dialect.oracle;
 import io.datasync.api.CanonicalType;
 import io.datasync.api.CanonicalType.Kind;
 import io.datasync.api.ObjectRef;
+import io.datasync.api.ReadSpec;
 import io.datasync.jdbc.BulkLoader;
 import io.datasync.jdbc.JdbcColumn;
 import io.datasync.jdbc.SqlDialect;
@@ -10,7 +11,7 @@ import io.datasync.jdbc.SqlDialect;
 import java.util.List;
 import java.util.Locale;
 
-/** Oracle 12c+. Source side only for now; the sink side (MERGE, array-bound staging) arrives in M5. */
+/** Oracle 11g and later. Source side only for now; the sink side (MERGE, array-bound staging) arrives in M5. */
 public final class OracleDialect implements SqlDialect {
 
     @Override
@@ -21,6 +22,12 @@ public final class OracleDialect implements SqlDialect {
     @Override
     public String normalizeIdentifier(String id) {
         return id.toUpperCase(Locale.ROOT);
+    }
+
+    /** ROWNUM over an ordered inline view: FETCH FIRST needs 12c, this works on every version. */
+    @Override
+    public String keysetQuery(ReadSpec spec, boolean afterKey) {
+        return "SELECT * FROM (" + keysetScan(spec, afterKey) + ") WHERE ROWNUM <= " + spec.chunkSize();
     }
 
     @Override

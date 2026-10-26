@@ -38,11 +38,16 @@ public interface SqlDialect {
         return ref.schema() == null ? quote(ref.name()) : quote(ref.schema()) + "." + quote(ref.name());
     }
 
+    /** One chunk of a keyset scan: {@link #keysetScan} limited to {@code chunkSize} rows. */
+    default String keysetQuery(ReadSpec spec, boolean afterKey) {
+        return keysetScan(spec, afterKey) + " FETCH FIRST " + spec.chunkSize() + " ROWS ONLY";
+    }
+
     /**
-     * One chunk of a keyset scan. With {@code afterKey}, the query takes one bind per key prefix
+     * The scan in key order, without a row limit. With {@code afterKey}, it takes one bind per key prefix
      * (see {@link #keysetBinds}), written out because Oracle has no row-value comparison.
      */
-    default String keysetQuery(ReadSpec spec, boolean afterKey) {
+    default String keysetScan(ReadSpec spec, boolean afterKey) {
         List<String> keys = spec.keyColumns().stream().map(this::quote).toList();
         StringBuilder sql = new StringBuilder("SELECT ")
             .append(spec.columns().stream().map(this::quote).collect(Collectors.joining(", ")))
@@ -54,9 +59,7 @@ public interface SqlDialect {
                     .collect(Collectors.joining(" AND ")) + ")")
                 .collect(Collectors.joining(" OR ")));
         }
-        return sql.append(" ORDER BY ").append(String.join(", ", keys))
-            .append(" FETCH FIRST ").append(spec.chunkSize()).append(" ROWS ONLY")
-            .toString();
+        return sql.append(" ORDER BY ").append(String.join(", ", keys)).toString();
     }
 
     /** Bind values for {@link #keysetQuery} with {@code afterKey}: k1, k1 k2, k1 k2 k3, ... */
