@@ -13,7 +13,8 @@ The full design is in [Design.md](Design.md).
 |---|---|
 | M1: engine core and snapshot diff (Oracle and PostgreSQL sources, PostgreSQL sink, YAML CLI) | Done |
 | M4: REST API and management UI | Done |
-| M2: watermark mode and scheduler | Not started. Jobs run only when started with **Run now** or the CLI |
+| M2: scheduler (cron or interval, skip-on-overlap, jitter, per-connection concurrency cap, lease) | Done in the server; the CLI still runs each job once |
+| M2: watermark and hybrid modes, reconcile | Not started |
 | M3: webhook sink, retries and dead letters | Not started |
 | M5: Oracle as a sink (MERGE from a global temporary table; Oracle 11g and later) | Done |
 | M6 to M8: outbox and multi-sink fan-out, hardening, transformations | Not started |
@@ -65,7 +66,9 @@ Other endpoints:
 2. **Jobs, then New job**: pick the source table or view, the columns and the key column, the delete guard and
    the sinks. The last step is a dry run that shows the column mapping and sample rows. A job can be saved
    only after its dry run succeeds.
-3. On the job page, click **Run now**. Missing target tables are created on the first run.
+3. Active jobs run on their schedule: every 5 minutes by default, or any interval of at least 10 seconds or a
+   cron expression (server time zone). Click **Run now** on the job page to run one immediately. A scheduled run
+   is skipped while the previous one is still going. Missing target tables are created on the first run.
 
 Deletes are **soft** by default: the target row stays, with `_deleted_at` and `_is_deleted` set. If the row
 comes back at the source, both are cleared. When a run would delete more than the job's **delete guard**

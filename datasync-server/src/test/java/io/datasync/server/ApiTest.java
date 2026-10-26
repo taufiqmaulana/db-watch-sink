@@ -20,9 +20,12 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
-import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 /** The management flow end to end: sign in, configure, dry run, run, and role checks. */
 @QuarkusTest
@@ -79,6 +82,18 @@ class ApiTest {
         as(admin).post("/jobs/" + jobId + "/run").then().statusCode(202);
         awaitRunFinished(admin, jobId);
         assertThat(query("SELECT string_agg(title, ',' ORDER BY id) FROM items_copy2")).isEqualTo("a,b");
+
+        // scheduled runs fire on their own, and pausing stops them
+        Map<String, Object> scheduled = new HashMap<>(twoSinks);
+        scheduled.put("every", "10s");
+        scheduled.put("jitterPercent", 0);
+        as(admin).body(Map.of("config", scheduled, "version", 2)).put("/jobs/" + jobId).then().statusCode(200).body("nextRunAt", notNullValue());
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(25));
+        while (as(admin).get("/jobs/" + jobId + "/runs").then().extract().jsonPath().getList("$").size() < 3) {
+            if (Instant.now().isAfter(deadline)) throw new AssertionError("no scheduled run within 25 s");
+            Thread.sleep(500);
+        }
+        as(admin).post("/jobs/" + jobId + "/pause").then().statusCode(200).body("nextRunAt", nullValue());
         as(admin).delete("/connections/" + connId).then().statusCode(409).body("message", containsString("items_sync"));
 
         as(admin).body(Map.of("username", "vera", "password", "viewer-password-1", "role", "VIEWER")).post("/users").then().statusCode(201);
@@ -89,7 +104,7 @@ class ApiTest {
         as(viewer).get("/users").then().statusCode(403);
 
         as(admin).get("/audit").then().statusCode(200).body("action", hasItem("job.run"));
-        as(admin).get("/overview").then().statusCode(200).body("jobs", equalTo(1)).body("runs24h", equalTo(2));
+        as(admin).get("/overview").then().statusCode(200).body("jobs", equalTo(1)).body("runs24h", greaterThanOrEqualTo(3));
     }
 
     private static String login(String username, String password, boolean mustChange) {

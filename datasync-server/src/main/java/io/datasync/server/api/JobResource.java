@@ -8,9 +8,11 @@ import io.datasync.server.Audit;
 import io.datasync.server.Db;
 import io.datasync.server.Events;
 import io.datasync.server.JobConfigs;
+import io.datasync.server.JobSchedule;
 import io.datasync.server.Json;
 import io.datasync.server.Runs;
 import io.datasync.server.Runs.RunView;
+import io.datasync.server.Scheduler;
 import io.datasync.server.api.ConnectionResource.ConnectionRole;
 import io.datasync.server.auth.Requires;
 import io.datasync.server.auth.Role;
@@ -40,8 +42,9 @@ public class JobResource {
 
     public enum Status { ACTIVE, PAUSED, NEEDS_REVIEW }
 
+    /** {@code nextRunAt} is set only while the job is ACTIVE. */
     public record JobView(String id, String name, Status status, int version, boolean running, @Schema(nullable = true) RunView lastRun,
-                          JobDef config, Instant createdAt, Instant updatedAt) {}
+                          @Schema(nullable = true) Instant nextRunAt, JobDef config, Instant createdAt, Instant updatedAt) {}
 
     /** {@code version} is required on update and must match the stored one (optimistic locking). */
     public record JobInput(JobDef config, Integer version) {}
@@ -55,6 +58,9 @@ public class JobResource {
 
     @Inject
     JobConfigs configs;
+
+    @Inject
+    Scheduler scheduler;
 
     @Inject
     Runs runs;
@@ -137,7 +143,7 @@ public class JobResource {
     @Requires(Role.OPERATOR)
     public RestResponse<JobView> run(String id, @RestQuery boolean allowDeletes) {
         JobView job = get(id);
-        if (!runs.start(id, allowDeletes)) throw ApiErrors.conflict("This job is already running");
+        if (runs.start(id, allowDeletes) == null) throw ApiErrors.conflict("This job is already running");
         audit.record("job.run", "job:" + id, Map.of("name", job.name(), "allowDeletes", allowDeletes));
         return RestResponse.status(RestResponse.Status.ACCEPTED, get(id));
     }
@@ -166,6 +172,7 @@ public class JobResource {
 
     private void changed(String action, String id, String name) {
         audit.record(action, "job:" + id, Map.of("name", name));
+        scheduler.reschedule(id);
         events.publish(new Events.Event("job-changed", id, null, null));
     }
 
@@ -190,6 +197,7 @@ public class JobResource {
         ApiErrors.range(def.fetchSize(), 1, 100_000, "Fetch size");
         ApiErrors.range(def.maxDeletePercent(), 0, 100, "Delete guard");
         ApiErrors.range(def.queryTimeoutSeconds(), 1, 86_400, "Query timeout");
+        JobSchedule.of(def);
         if (def.sinks().isEmpty()) throw new IllegalArgumentException("Add at least one sink");
         if (def.sinks().stream().map(JobRunner::sinkId).distinct().count() < def.sinks().size()) {
             throw new IllegalArgumentException("Two sinks write to the same target table");
@@ -215,8 +223,9 @@ public class JobResource {
 
     private JobView view(ResultSet rs, Map<String, RunView> latest) throws SQLException {
         String id = rs.getString("id");
-        return new JobView(id, rs.getString("name"), Status.valueOf(rs.getString("status")), rs.getInt("version"),
-            runs.isRunning(id), latest.get(id), Json.read(rs.getString("config_json"), JobDef.class),
-            Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
+        Status status = Status.valueOf(rs.getString("status"));
+        return new JobView(id, rs.getString("name"), status, rs.getInt("version"), runs.isRunning(id), latest.get(id),
+            status == Status.ACTIVE ? scheduler.nextRun(id).orElse(null) : null,
+            Json.read(rs.getString("config_json"), JobDef.class), Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
     }
 }

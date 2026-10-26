@@ -21,6 +21,10 @@ jobs:
     fetchSize: 5000
     maxDeletePercent: 20
     queryTimeoutSeconds: 300
+    schedule: "*/5 * * * *"           # used by the server; the CLI runs each job once
+    # every: 30s                      # or a fixed interval (at least 10s), which wins over schedule
+    # fixedDelay: true                # count the interval from the end of each run, not its start
+    jitterPercent: 10
     sinks:
       - type: jdbc
         connection: pg_dw

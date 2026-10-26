@@ -15,13 +15,16 @@ import org.eclipse.microprofile.openapi.annotations.media.Schema;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -45,6 +48,7 @@ public class Runs {
 
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Set<String> running = ConcurrentHashMap.newKeySet();
+    private final Map<String, Semaphore> connectionSlots = new ConcurrentHashMap<>();
 
     void recoverInterrupted(@Observes StartupEvent ignored) {
         db.update("UPDATE run SET state = 'FAILED', finished_at = ?, error = 'interrupted by a restart' WHERE state = 'RUNNING'",
@@ -55,14 +59,20 @@ public class Runs {
         return running.contains(jobId);
     }
 
-    /** Starts a run in the background; false if the job is already running. */
-    public boolean start(String jobId, boolean allowDeletes) {
+    /**
+     * Starts a run in the background and returns its completion, or null if the job is already running.
+     * The run first takes a slot on every connection it uses, so jobs sharing a database stay within
+     * that connection's max concurrency.
+     */
+    public CompletableFuture<Void> start(String jobId, boolean allowDeletes) {
         DataSyncConfig config = configs.engineConfig(jobId, configs.job(jobId));
-        if (!running.add(jobId)) return false;
+        if (!running.add(jobId)) return null;
         events.publish(new Events.Event("run-started", jobId, null, RunState.RUNNING.name()));
-        executor.submit(() -> {
+        return CompletableFuture.runAsync(() -> {
             String runId = null;
             RunState state = RunState.FAILED;
+            List<Semaphore> slots = slots(config);
+            slots.forEach(Semaphore::acquireUninterruptibly);
             try {
                 RunResult result = new JobRunner(config, db.store()).run(jobId, allowDeletes);
                 runId = result.runId();
@@ -75,11 +85,25 @@ public class Runs {
             } catch (Exception e) {
                 Log.errorf(e, "run of job %s could not be recorded", jobId);
             } finally {
+                slots.forEach(Semaphore::release);
                 running.remove(jobId);
                 events.publish(new Events.Event("run-finished", jobId, runId, state.name()));
             }
-        });
-        return true;
+        }, executor);
+    }
+
+    /**
+     * One semaphore per connection, sized by its max concurrency, taken in id order so two runs never wait
+     * on each other. The size is part of the key, so a changed limit takes effect for new runs.
+     */
+    private List<Semaphore> slots(DataSyncConfig config) {
+        return config.connections().stream()
+            .sorted(Comparator.comparing(c -> String.valueOf(c.get("name"))))
+            .map(c -> {
+                int max = Integer.parseInt(String.valueOf(c.getOrDefault("maxConcurrency", 2)));
+                return connectionSlots.computeIfAbsent(c.get("name") + "#" + max, k -> new Semaphore(max));
+            })
+            .toList();
     }
 
     public List<RunView> forJob(String jobId, int limit) {
