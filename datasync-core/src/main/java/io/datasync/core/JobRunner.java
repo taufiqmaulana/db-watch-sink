@@ -1,5 +1,6 @@
 package io.datasync.core;
 
+import io.datasync.api.Column;
 import io.datasync.api.ConnectionConfig;
 import io.datasync.api.ObjectRef;
 import io.datasync.api.ObjectSchema;
@@ -10,7 +11,6 @@ import io.datasync.api.SinkContext;
 import io.datasync.api.SourceConnector;
 import io.datasync.core.config.DataSyncConfig;
 import io.datasync.core.config.DataSyncConfig.JobDef;
-import io.datasync.core.config.DataSyncConfig.Mode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,14 +38,14 @@ public final class JobRunner {
     }
 
     /** With {@code allowDeletes}, the delete guard is skipped (operator override after review). */
-    public RunResult run(String jobName, boolean allowDeletes) throws SQLException {
+    public RunResult run(String jobName, RunKind kind, boolean allowDeletes) throws SQLException {
         JobDef def = job(jobName);
-        String runId = state.startRun(def.name(), "POLL");
-        SnapshotDiff diff = new SnapshotDiff(state, runId);
+        String runId = state.startRun(def.name(), kind.name());
+        DiffRun diff = new DiffRun(state, runId);
         RunState outcome = RunState.SUCCEEDED;
         String error = null;
         try (Job job = open(def)) {
-            diff.run(job, allowDeletes);
+            diff.run(job, kind, allowDeletes);
         } catch (DeleteGuardException e) {
             outcome = RunState.NEEDS_REVIEW;
             error = e.getMessage();
@@ -67,6 +67,7 @@ public final class JobRunner {
         try (SourceConnector source = Connectors.openSource(connection(def.source().connection()))) {
             ObjectSchema schema = source.describe(ObjectRef.parse(def.source().object()));
             ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys());
+            watermark(def, schema);
             List<Map<String, Object>> rows = new ArrayList<>();
             ReadSpec spec = new ReadSpec(schema.ref(), mapping.sourceColumns(), mapping.sourceKeys(),
                 sampleRows, sampleRows, Duration.ofSeconds(def.queryTimeoutSeconds()));
@@ -88,10 +89,20 @@ public final class JobRunner {
             .orElseThrow(() -> new IllegalArgumentException("unknown job: " + jobName));
     }
 
-    private Job open(JobDef def) {
-        if (def.mode() != Mode.SNAPSHOT_DIFF) {
-            throw new UnsupportedOperationException("mode " + def.mode() + " is not available yet, use SNAPSHOT_DIFF");
+    /** The job's watermark column, checked against the source; null for SNAPSHOT_DIFF jobs. */
+    private static Watermark watermark(JobDef def, ObjectSchema schema) {
+        if (!def.incremental()) return null;
+        String name = def.watermark().column();
+        if (name == null) throw new IllegalArgumentException(def.mode() + " jobs need a watermark column");
+        Column column = schema.columns().stream().filter(c -> c.name().equals(name)).findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("watermark column " + name + " does not exist in " + schema.ref()));
+        if (!Watermark.KINDS.contains(column.type().kind())) {
+            throw new IllegalArgumentException("watermark column " + name + " must be a date, timestamp or number, not " + column.type().kind());
         }
+        return new Watermark(name, column.type(), def.watermark().overlapDuration());
+    }
+
+    private Job open(JobDef def) {
         if (def.sinks().isEmpty()) throw new IllegalArgumentException("job " + def.name() + " has no sinks");
 
         SourceConnector source = Connectors.openSource(connection(def.source().connection()));
@@ -99,6 +110,7 @@ public final class JobRunner {
         try {
             ObjectSchema schema = source.describe(ObjectRef.parse(def.source().object()));
             ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys());
+            Watermark watermark = watermark(def, schema);
             for (Map<String, Object> cfg : def.sinks()) {
                 String sinkId = sinkId(cfg);
                 if (sinks.containsKey(sinkId)) throw new IllegalArgumentException("two sinks of job " + def.name() + " write to " + sinkId);
@@ -107,9 +119,12 @@ public final class JobRunner {
                 sinks.put(sinkId, sink);
                 sink.init(new SinkContext(def.name(), sinkId, cfg), mapping.target());
             }
-            ReadSpec spec = new ReadSpec(schema.ref(), mapping.sourceColumns(), mapping.sourceKeys(),
+            // the watermark column is read even when it is not synced, to move the cursor
+            List<String> read = watermark == null || mapping.sourceColumns().contains(watermark.column()) ? mapping.sourceColumns()
+                : Stream.concat(mapping.sourceColumns().stream(), Stream.of(watermark.column())).toList();
+            ReadSpec spec = new ReadSpec(schema.ref(), read, mapping.sourceKeys(),
                 def.fetchSize(), def.batchSize(), Duration.ofSeconds(def.queryTimeoutSeconds()));
-            return new Job(def.name(), source, spec, mapping, sinks, def.maxDeletePercent());
+            return new Job(def.name(), source, spec, mapping, sinks, def.maxDeletePercent(), watermark);
         } catch (RuntimeException e) {
             sinks.values().forEach(Sink::close);
             source.close();
@@ -119,7 +134,7 @@ public final class JobRunner {
 
     /**
      * What a sink writes to, e.g. {@code jdbc:pg_dw:public.customers}. It stays the same when other sinks are
-     * added or removed, and changes when the target does, which then triggers a full load (see {@link SnapshotDiff}).
+     * added or removed, and changes when the target does, which then triggers a full load (see {@link DiffRun}).
      */
     public static String sinkId(Map<String, Object> sink) {
         return Stream.of("type", "connection", "target").map(sink::get).filter(Objects::nonNull).map(Object::toString)

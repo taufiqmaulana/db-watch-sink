@@ -1,6 +1,7 @@
 package io.datasync.cli;
 
 import io.datasync.core.JobRunner;
+import io.datasync.core.RunKind;
 import io.datasync.core.RunResult;
 import io.datasync.core.StateStore;
 import io.datasync.core.config.ConfigLoader;
@@ -13,14 +14,15 @@ import java.nio.file.Path;
 import java.util.List;
 
 /**
- * {@code datasync run <config.yaml> [--job NAME] [--state FILE] [--allow-deletes]}
+ * {@code datasync run <config.yaml> [--job NAME] [--state FILE] [--reconcile] [--allow-deletes]}
  * <p>
- * Runs every job (or one) once. Exit code: 0 all succeeded, 1 a run failed, 2 a run needs review
- * (delete guard tripped; re-run with {@code --allow-deletes} once the deletes are confirmed).
+ * Runs every job (or one) once. {@code --reconcile} makes WATERMARK and HYBRID jobs do a full snapshot diff,
+ * which also applies deletes. Exit code: 0 all succeeded, 1 a run failed, 2 a run needs review (delete guard
+ * tripped; re-run with {@code --allow-deletes}, and {@code --reconcile} for those jobs, once the deletes are confirmed).
  */
 public final class Main {
 
-    private static final String USAGE = "usage: datasync run <config.yaml> [--job NAME] [--state FILE] [--allow-deletes]";
+    private static final String USAGE = "usage: datasync run <config.yaml> [--job NAME] [--state FILE] [--reconcile] [--allow-deletes]";
 
     public static void main(String[] args) throws Exception {
         System.exit(run(args));
@@ -32,10 +34,12 @@ public final class Main {
         String job = null;
         Path stateFile = Path.of("data", "datasync.db");
         boolean allowDeletes = false;
+        RunKind kind = RunKind.POLL;
         for (int i = 2; i < args.length; i++) {
             String option = args[i];
-            if (option.equals("--allow-deletes")) {
-                allowDeletes = true;
+            if (option.equals("--allow-deletes") || option.equals("--reconcile")) {
+                if (option.equals("--allow-deletes")) allowDeletes = true;
+                else kind = RunKind.RECONCILE;
                 continue;
             }
             if (i + 1 == args.length) return usage();
@@ -56,7 +60,7 @@ public final class Main {
         try (StateStore state = new StateStore(stateFile)) {
             JobRunner runner = new JobRunner(config, state);
             for (String name : jobs) {
-                RunResult result = runner.run(name, allowDeletes);
+                RunResult result = runner.run(name, kind, allowDeletes);
                 exit = Math.max(exit, switch (result.state()) {
                     case SUCCEEDED -> 0;
                     case NEEDS_REVIEW -> 2;

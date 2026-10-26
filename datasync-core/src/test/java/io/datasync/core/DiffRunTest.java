@@ -14,6 +14,7 @@ import io.datasync.api.Sink;
 import io.datasync.api.SinkCapabilities;
 import io.datasync.api.SinkContext;
 import io.datasync.api.SourceConnector;
+import io.datasync.api.WatermarkSpec;
 import io.datasync.core.config.DataSyncConfig.ColumnsDef;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -33,12 +35,13 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class SnapshotDiffTest {
+class DiffRunTest {
 
     private static final ObjectSchema SCHEMA = new ObjectSchema(ObjectRef.parse("HR.CUSTOMERS"), List.of(
         new Column("ID", CanonicalType.of(CanonicalType.Kind.INT64), false),
         new Column("NAME", CanonicalType.of(CanonicalType.Kind.STRING), true),
-        new Column("BALANCE", CanonicalType.of(CanonicalType.Kind.DECIMAL), true)), List.of("ID"));
+        new Column("BALANCE", CanonicalType.of(CanonicalType.Kind.DECIMAL), true),
+        new Column("UPDATED", new CanonicalType(CanonicalType.Kind.TIMESTAMP, 6, 0), true)), List.of("ID"));
 
     @TempDir
     Path dir;
@@ -51,14 +54,24 @@ class SnapshotDiffTest {
     @BeforeEach
     void setUp() throws Exception {
         state = new StateStore(dir.resolve("state.db"));
-        ColumnMapping mapping = ColumnMapping.resolve(SCHEMA, new ColumnsDef(null, null, Map.of("NAME", "customer_name")), List.of());
+        ColumnMapping mapping = ColumnMapping.resolve(SCHEMA, new ColumnsDef(null, List.of("UPDATED"), Map.of("NAME", "customer_name")), List.of());
         ReadSpec spec = new ReadSpec(SCHEMA.ref(), mapping.sourceColumns(), mapping.sourceKeys(), 100, 2, Duration.ofSeconds(30));
         job = new Job("customers", source, spec, mapping, Map.of("memory:a", sink), 40);
         for (long id = 1; id <= 5; id++) source.put(id, "c" + id, "10.00");
     }
 
     private void useSinks(Map<String, Sink> sinks) {
-        job = new Job(job.id(), job.source(), job.readSpec(), job.mapping(), sinks, job.maxDeletePercent());
+        job = new Job(job.id(), job.source(), job.readSpec(), job.mapping(), sinks, job.maxDeletePercent(), job.watermark());
+    }
+
+    /** Makes the job a WATERMARK job on UPDATED with a 5 minute overlap; rows 1..5 were updated 10 minutes apart. */
+    private void useWatermark() {
+        job = new Job(job.id(), job.source(), job.readSpec(), job.mapping(), job.sinks(), job.maxDeletePercent(),
+            new Watermark("UPDATED", SCHEMA.columns().get(3).type(), Duration.ofMinutes(5)));
+        for (long id = 1; id <= 5; id++) {
+            source.clock = LocalDateTime.of(2026, 1, 1, 0, 0).plusMinutes(10 * id);
+            source.put(id, "c" + id, "10.00");
+        }
     }
 
     @AfterEach
@@ -135,6 +148,45 @@ class SnapshotDiffTest {
     }
 
     @Test
+    void watermarkRunsReadOnlyRowsSinceTheCursorMinusTheOverlap() throws Exception {
+        useWatermark();
+        assertThat(run(false)).as("no cursor yet: full read").isEqualTo(new RunStats(5, 5, 0, 0));
+
+        // cursor 00:50, overlap 5m: only row 5 (00:50) is re-read, and dropped as unchanged
+        assertThat(run(false)).isEqualTo(new RunStats(1, 0, 0, 1));
+
+        source.clock = LocalDateTime.of(2026, 1, 1, 2, 0);
+        source.put(2L, "changed", "10.00");
+        assertThat(run(false)).isEqualTo(new RunStats(2, 1, 0, 1));
+        assertThat(sink.target.get(2L)).containsEntry("customer_name", "changed");
+    }
+
+    @Test
+    void watermarkRunsNeverDeleteButAReconcileDoes() throws Exception {
+        useWatermark();
+        run(false);
+        source.rows.remove(3L);
+
+        assertThat(run(false).deletes()).isZero();
+        assertThat(sink.target).containsKey(3L);
+
+        assertThat(run(RunKind.RECONCILE, false)).isEqualTo(new RunStats(4, 0, 1, 4));
+        assertThat(sink.target).doesNotContainKey(3L);
+    }
+
+    @Test
+    void aSinkAddedToAWatermarkJobGetsAFullRead() throws Exception {
+        useWatermark();
+        run(false);
+        FakeSink added = new FakeSink();
+        useSinks(Map.of("memory:a", sink, "memory:b", added));
+
+        assertThat(run(false).rowsRead()).isEqualTo(5);
+        assertThat(added.target).hasSize(5);
+        assertThat(run(false).rowsRead()).as("back to watermark reads").isEqualTo(1);
+    }
+
+    @Test
     void deleteGuardStopsMassDeletesUntilAllowed() throws Exception {
         run(false);
         source.rows.remove(1L);
@@ -166,19 +218,26 @@ class SnapshotDiffTest {
     }
 
     private RunStats run(boolean allowDeletes) throws Exception {
-        SnapshotDiff diff = new SnapshotDiff(state, state.startRun("customers", "POLL"));
-        diff.run(job, allowDeletes);
+        return run(RunKind.POLL, allowDeletes);
+    }
+
+    private RunStats run(RunKind kind, boolean allowDeletes) throws Exception {
+        DiffRun diff = new DiffRun(state, state.startRun("customers", kind.name()));
+        diff.run(job, kind, allowDeletes);
         return diff.stats();
     }
 
     static final class FakeSource implements SourceConnector {
         final Map<Long, Map<String, Object>> rows = new LinkedHashMap<>();
+        /** The UPDATED value given to rows put from now on. */
+        LocalDateTime clock = LocalDateTime.of(2026, 1, 1, 0, 0);
 
         void put(long id, String name, String balance) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("ID", id);
             row.put("NAME", name);
             row.put("BALANCE", new BigDecimal(balance));
+            row.put("UPDATED", clock);
             rows.put(id, row);
         }
 
@@ -190,7 +249,11 @@ class SnapshotDiffTest {
 
         @Override
         public RecordCursor read(ReadSpec spec) {
-            Iterator<Map<String, Object>> it = new ArrayList<>(rows.values()).iterator();
+            WatermarkSpec wm = spec.watermark();
+            Iterator<Map<String, Object>> it = rows.values().stream()
+                .filter(r -> wm == null || r.get(wm.column()) != null
+                    && (wm.from() == null || ((LocalDateTime) r.get(wm.column())).compareTo((LocalDateTime) wm.from()) >= 0))
+                .toList().iterator();
             return new RecordCursor() {
                 @Override public boolean hasNext() { return it.hasNext(); }
                 @Override public Map<String, Object> next() { return it.next(); }

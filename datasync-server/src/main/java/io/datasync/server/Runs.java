@@ -1,6 +1,7 @@
 package io.datasync.server;
 
 import io.datasync.core.JobRunner;
+import io.datasync.core.RunKind;
 import io.datasync.core.RunResult;
 import io.datasync.core.RunState;
 import io.datasync.core.config.DataSyncConfig;
@@ -64,7 +65,7 @@ public class Runs {
      * The run first takes a slot on every connection it uses, so jobs sharing a database stay within
      * that connection's max concurrency.
      */
-    public CompletableFuture<Void> start(String jobId, boolean allowDeletes) {
+    public CompletableFuture<Void> start(String jobId, RunKind kind, boolean allowDeletes) {
         DataSyncConfig config = configs.engineConfig(jobId, configs.job(jobId));
         if (!running.add(jobId)) return null;
         events.publish(new Events.Event("run-started", jobId, null, RunState.RUNNING.name()));
@@ -74,7 +75,7 @@ public class Runs {
             List<Semaphore> slots = slots(config);
             slots.forEach(Semaphore::acquireUninterruptibly);
             try {
-                RunResult result = new JobRunner(config, db.store()).run(jobId, allowDeletes);
+                RunResult result = new JobRunner(config, db.store()).run(jobId, kind, allowDeletes);
                 runId = result.runId();
                 state = result.state();
                 if (state == RunState.NEEDS_REVIEW) {

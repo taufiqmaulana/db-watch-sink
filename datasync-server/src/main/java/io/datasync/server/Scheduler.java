@@ -1,5 +1,6 @@
 package io.datasync.server;
 
+import io.datasync.core.RunKind;
 import io.datasync.core.config.DataSyncConfig.JobDef;
 import io.quarkus.logging.Log;
 import io.quarkus.runtime.StartupEvent;
@@ -23,10 +24,11 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Fires each job on its schedule (design 5A). Every tick rereads the job, so edits, pausing, deletion and
- * NEEDS_REVIEW take effect on their own; only ACTIVE jobs run. A tick that finds the job still running is
- * skipped, and ticks missed while the server was busy or asleep are not caught up. Ticks fire only while this
- * server holds the scheduler lease.
+ * Fires each job on its schedule (design 5A), and HYBRID jobs also on their reconcile schedule (design 5.4).
+ * Every tick rereads the job, so edits, pausing, deletion and NEEDS_REVIEW take effect on their own; only ACTIVE
+ * jobs run. A poll that finds the job still running is skipped; a reconcile retries a minute later instead, so a
+ * frequent poll cannot starve it. Ticks missed while the server was busy or asleep are not caught up. Ticks fire
+ * only while this server holds the scheduler lease.
  */
 @Singleton
 public class Scheduler {
@@ -34,6 +36,7 @@ public class Scheduler {
     private static final String LEASE = "scheduler";
     private static final Duration LEASE_TTL = Duration.ofSeconds(90);
     private static final Duration LEASE_RENEWAL = Duration.ofSeconds(30);
+    private static final Duration RECONCILE_RETRY = Duration.ofMinutes(1);
 
     private record Planned(Instant at, ScheduledFuture<?> tick) {}
 
@@ -53,59 +56,77 @@ public class Scheduler {
         db.query("SELECT id FROM job", rs -> rs.getString(1)).forEach(this::reschedule);
     }
 
-    /** Plans a job afresh from its stored schedule; call after it is created, edited or deleted. */
+    /** Plans a job afresh from its stored schedules; call after it is created, edited or deleted. */
     public void reschedule(String jobId) {
-        plan(jobId, Instant.now());
+        for (RunKind kind : RunKind.values()) plan(jobId, kind, Instant.now());
     }
 
-    /** When the job will next be considered for a run (it runs only if ACTIVE then). */
-    public Optional<Instant> nextRun(String jobId) {
-        return Optional.ofNullable(planned.get(jobId)).map(Planned::at);
+    /** When the job will next be considered for a run of this kind (it runs only if ACTIVE then). */
+    public Optional<Instant> next(String jobId, RunKind kind) {
+        return Optional.ofNullable(planned.get(key(jobId, kind))).map(Planned::at);
     }
 
-    /** Cancels the job's pending tick and plans the next one after {@code after}, or none if the job is gone. */
-    private synchronized void plan(String jobId, Instant after) {
-        Planned previous = planned.remove(jobId);
-        if (previous != null) previous.tick().cancel(false);
-        JobSchedule schedule = load(jobId).orElse(null);
-        if (schedule == null) return;
-
+    /** Cancels the pending tick and plans the next one after {@code after}, or none if there is no such schedule. */
+    private synchronized void plan(String jobId, RunKind kind, Instant after) {
+        JobSchedule schedule = load(jobId, kind).orElse(null);
+        if (schedule == null) {
+            cancel(jobId, kind);
+            return;
+        }
         Instant now = Instant.now();
         Instant next = schedule.next(after);
         if (next.isBefore(now)) next = schedule.next(now);   // do not catch up on missed ticks
-        Instant tickAt = next.plus(schedule.jitter(next));
-        Instant base = next;
-        ScheduledFuture<?> tick = timer.schedule(() -> fire(jobId, schedule, base),
-            Math.max(0, Duration.between(now, tickAt).toMillis()), TimeUnit.MILLISECONDS);
-        planned.put(jobId, new Planned(tickAt, tick));
+        planAt(jobId, kind, schedule, next, next.plus(schedule.jitter(next)));
+    }
+
+    private synchronized void planAt(String jobId, RunKind kind, JobSchedule schedule, Instant base, Instant tickAt) {
+        cancel(jobId, kind);
+        ScheduledFuture<?> tick = timer.schedule(() -> fire(jobId, kind, schedule, base),
+            Math.max(0, Duration.between(Instant.now(), tickAt).toMillis()), TimeUnit.MILLISECONDS);
+        planned.put(key(jobId, kind), new Planned(tickAt, tick));
+    }
+
+    private void cancel(String jobId, RunKind kind) {
+        Planned previous = planned.remove(key(jobId, kind));
+        if (previous != null) previous.tick().cancel(false);
     }
 
     /** {@code base} is the tick's planned time without jitter, so intervals do not drift. */
-    private void fire(String jobId, JobSchedule schedule, Instant base) {
+    private void fire(String jobId, RunKind kind, JobSchedule schedule, Instant base) {
         CompletableFuture<Void> run = null;
+        boolean due = false;
         try {
-            if (leader && isActive(jobId)) {
-                run = runs.start(jobId, false);
-                if (run == null) Log.infof("job %s is still running, skipped its scheduled run", jobId);
+            due = leader && isActive(jobId);
+            if (due) {
+                run = runs.start(jobId, kind, false);
+                if (run == null) Log.infof("job %s is still running, %s its scheduled %s", jobId,
+                    kind == RunKind.RECONCILE ? "retrying" : "skipped", kind.name().toLowerCase());
             }
         } catch (RuntimeException e) {
-            Log.errorf(e, "scheduled run of job %s could not start", jobId);
+            Log.errorf(e, "scheduled %s of job %s could not start", kind.name().toLowerCase(), jobId);
         }
-        if (schedule.fixedDelay() && run != null) {
-            run.whenComplete((ok, error) -> plan(jobId, Instant.now()));
+        if (due && run == null && kind == RunKind.RECONCILE) {
+            Instant retry = Instant.now().plus(RECONCILE_RETRY);
+            planAt(jobId, kind, schedule, base, retry);
+        } else if (schedule.fixedDelay() && run != null) {
+            run.whenComplete((ok, error) -> plan(jobId, kind, Instant.now()));
         } else {
-            plan(jobId, schedule.fixedDelay() ? Instant.now() : base);
+            plan(jobId, kind, schedule.fixedDelay() ? Instant.now() : base);
         }
     }
 
-    private Optional<JobSchedule> load(String jobId) {
+    private Optional<JobSchedule> load(String jobId, RunKind kind) {
         Optional<JobDef> def = db.one("SELECT config_json FROM job WHERE id = ?", rs -> Json.read(rs.getString(1), JobDef.class), jobId);
         try {
-            return def.map(JobSchedule::of);
+            return kind == RunKind.POLL ? def.map(JobSchedule::of) : def.flatMap(JobSchedule::reconcile);
         } catch (IllegalArgumentException e) {
-            Log.errorf("job %s is not scheduled: %s", jobId, e.getMessage());
+            Log.errorf("job %s has no %s schedule: %s", jobId, kind.name().toLowerCase(), e.getMessage());
             return Optional.empty();
         }
+    }
+
+    private static String key(String jobId, RunKind kind) {
+        return jobId + "#" + kind;
     }
 
     private boolean isActive(String jobId) {

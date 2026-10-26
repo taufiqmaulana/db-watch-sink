@@ -94,6 +94,15 @@ class ApiTest {
             Thread.sleep(500);
         }
         as(admin).post("/jobs/" + jobId + "/pause").then().statusCode(200).body("nextRunAt", nullValue());
+
+        // incremental modes need a watermark column; a reconcile runs on demand, even while paused
+        Map<String, Object> watermark = new HashMap<>(scheduled);
+        watermark.put("mode", "WATERMARK");
+        as(admin).body(Map.of("config", watermark, "version", 3)).put("/jobs/" + jobId).then().statusCode(400)
+            .body("message", equalTo("Watermark column is required"));
+        as(admin).post("/jobs/" + jobId + "/reconcile").then().statusCode(202);
+        awaitRunFinished(admin, jobId);
+        as(admin).get("/jobs/" + jobId + "/runs").then().body("[0].kind", equalTo("RECONCILE")).body("[0].state", equalTo("SUCCEEDED"));
         as(admin).delete("/connections/" + connId).then().statusCode(409).body("message", containsString("items_sync"));
 
         as(admin).body(Map.of("username", "vera", "password", "viewer-password-1", "role", "VIEWER")).post("/users").then().statusCode(201);

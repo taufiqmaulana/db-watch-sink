@@ -2,8 +2,8 @@ package io.datasync.server.api;
 
 import io.datasync.core.JobRunner;
 import io.datasync.core.Preview;
+import io.datasync.core.RunKind;
 import io.datasync.core.config.DataSyncConfig.JobDef;
-import io.datasync.core.config.DataSyncConfig.Mode;
 import io.datasync.server.Audit;
 import io.datasync.server.Db;
 import io.datasync.server.Events;
@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Jobs are stored in the shape of the YAML config, with connections referenced by id. */
 @Path("/jobs")
@@ -42,9 +43,13 @@ public class JobResource {
 
     public enum Status { ACTIVE, PAUSED, NEEDS_REVIEW }
 
-    /** {@code nextRunAt} is set only while the job is ACTIVE. */
+    /**
+     * {@code nextRunAt} and {@code nextReconcileAt} (HYBRID only) are set only while the job is ACTIVE.
+     * {@code watermarkValue} is the highest watermark delivered so far, for WATERMARK and HYBRID jobs.
+     */
     public record JobView(String id, String name, Status status, int version, boolean running, @Schema(nullable = true) RunView lastRun,
-                          @Schema(nullable = true) Instant nextRunAt, JobDef config, Instant createdAt, Instant updatedAt) {}
+                          @Schema(nullable = true) Instant nextRunAt, @Schema(nullable = true) Instant nextReconcileAt,
+                          @Schema(nullable = true) String watermarkValue, JobDef config, Instant createdAt, Instant updatedAt) {}
 
     /** {@code version} is required on update and must match the stored one (optimistic locking). */
     public record JobInput(JobDef config, Integer version) {}
@@ -74,14 +79,16 @@ public class JobResource {
     @GET
     public List<JobView> list() {
         Map<String, RunView> latest = runs.latest();
-        return db.query(SELECT + " ORDER BY name", rs -> view(rs, latest));
+        Map<String, String> cursors = cursors();
+        return db.query(SELECT + " ORDER BY name", rs -> view(rs, latest, cursors));
     }
 
     @GET
     @Path("/{id}")
     public JobView get(String id) {
         Map<String, RunView> latest = runs.latest();
-        return db.one(SELECT + " WHERE id = ?", rs -> view(rs, latest), id).orElseThrow(() -> new NotFoundException("Job not found"));
+        Map<String, String> cursors = cursors();
+        return db.one(SELECT + " WHERE id = ?", rs -> view(rs, latest, cursors), id).orElseThrow(() -> new NotFoundException("Job not found"));
     }
 
     @POST
@@ -117,6 +124,7 @@ public class JobResource {
         db.tx(c -> {
             Db.update(c, "DELETE FROM row_index WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM sink_load WHERE job_id = ?", id);
+            Db.update(c, "DELETE FROM job_cursor WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM run WHERE job_id = ?", id);
             return Db.update(c, "DELETE FROM job WHERE id = ?", id);
         });
@@ -142,9 +150,24 @@ public class JobResource {
     @Path("/{id}/run")
     @Requires(Role.OPERATOR)
     public RestResponse<JobView> run(String id, @RestQuery boolean allowDeletes) {
+        return start(id, RunKind.POLL, allowDeletes);
+    }
+
+    /**
+     * Starts a full snapshot diff in the background (design 5.4). For WATERMARK and HYBRID jobs it is the only
+     * run that applies deletes; for SNAPSHOT_DIFF jobs it is the same as a regular run.
+     */
+    @POST
+    @Path("/{id}/reconcile")
+    @Requires(Role.OPERATOR)
+    public RestResponse<JobView> reconcile(String id, @RestQuery boolean allowDeletes) {
+        return start(id, RunKind.RECONCILE, allowDeletes);
+    }
+
+    private RestResponse<JobView> start(String id, RunKind kind, boolean allowDeletes) {
         JobView job = get(id);
-        if (runs.start(id, allowDeletes) == null) throw ApiErrors.conflict("This job is already running");
-        audit.record("job.run", "job:" + id, Map.of("name", job.name(), "allowDeletes", allowDeletes));
+        if (runs.start(id, kind, allowDeletes) == null) throw ApiErrors.conflict("This job is already running");
+        audit.record(kind == RunKind.POLL ? "job.run" : "job.reconcile", "job:" + id, Map.of("name", job.name(), "allowDeletes", allowDeletes));
         return RestResponse.status(RestResponse.Status.ACCEPTED, get(id));
     }
 
@@ -192,12 +215,16 @@ public class JobResource {
             throw new IllegalArgumentException("The source connection is a sink-only connection");
         }
         ApiErrors.required(def.source().object(), "Source table or view");
-        if (def.mode() != Mode.SNAPSHOT_DIFF) throw new IllegalArgumentException("Only snapshot-diff jobs are supported so far");
         ApiErrors.range(def.batchSize(), 1, 100_000, "Batch size");
         ApiErrors.range(def.fetchSize(), 1, 100_000, "Fetch size");
         ApiErrors.range(def.maxDeletePercent(), 0, 100, "Delete guard");
         ApiErrors.range(def.queryTimeoutSeconds(), 1, 86_400, "Query timeout");
+        if (def.incremental()) {
+            ApiErrors.required(def.watermark().column(), "Watermark column");
+            def.watermark().overlapDuration();   // the column itself is checked against the source by the dry run
+        }
         JobSchedule.of(def);
+        JobSchedule.reconcile(def);
         if (def.sinks().isEmpty()) throw new IllegalArgumentException("Add at least one sink");
         if (def.sinks().stream().map(JobRunner::sinkId).distinct().count() < def.sinks().size()) {
             throw new IllegalArgumentException("Two sinks write to the same target table");
@@ -221,11 +248,25 @@ public class JobResource {
             .orElseThrow(() -> new IllegalArgumentException("Connection " + connectionId + " does not exist"));
     }
 
-    private JobView view(ResultSet rs, Map<String, RunView> latest) throws SQLException {
+    /** Each job's watermark cursor, keyed by job id, as "column" + NUL + "value". */
+    private Map<String, String> cursors() {
+        return db.query("SELECT job_id, watermark_column, watermark_value FROM job_cursor",
+                rs -> Map.entry(rs.getString(1), rs.getString(2) + "\0" + rs.getString(3)))
+            .stream().collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
+    private JobView view(ResultSet rs, Map<String, RunView> latest, Map<String, String> cursors) throws SQLException {
         String id = rs.getString("id");
         Status status = Status.valueOf(rs.getString("status"));
+        JobDef config = Json.read(rs.getString("config_json"), JobDef.class);
+        boolean active = status == Status.ACTIVE;
+        // a cursor saved for another column than the current one is ignored by the next run
+        String cursor = cursors.get(id);
+        String watermark = cursor != null && config.incremental() && cursor.startsWith(config.watermark().column() + "\0")
+            ? cursor.substring(cursor.indexOf('\0') + 1) : null;
         return new JobView(id, rs.getString("name"), status, rs.getInt("version"), runs.isRunning(id), latest.get(id),
-            status == Status.ACTIVE ? scheduler.nextRun(id).orElse(null) : null,
-            Json.read(rs.getString("config_json"), JobDef.class), Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
+            active ? scheduler.next(id, RunKind.POLL).orElse(null) : null,
+            active ? scheduler.next(id, RunKind.RECONCILE).orElse(null) : null,
+            watermark, config, Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
     }
 }

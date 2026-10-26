@@ -50,8 +50,15 @@ class OracleToPostgresSyncTest {
                 batchSize: 2
                 sinks:
                   - { type: jdbc, connection: pg_dw, target: public.customers }
+              - name: customers_wm
+                source: { connection: oracle_prod, object: %s.CUSTOMERS }
+                mode: WATERMARK
+                watermark: { column: UPDATED_AT, overlap: 1m }
+                batchSize: 2
+                sinks:
+                  - { type: jdbc, connection: pg_dw, target: public.customers_wm }
             """.formatted(ORA.getJdbcUrl(), ORA.getUsername(), ORA.getPassword(),
-                PG.getJdbcUrl(), PG.getUsername(), PG.getPassword(), ORA.getUsername().toUpperCase()));
+                PG.getJdbcUrl(), PG.getUsername(), PG.getPassword(), ORA.getUsername().toUpperCase(), ORA.getUsername().toUpperCase()));
         String[] args = {"run", config.toString(), "--state", dir.resolve("state.db").toString()};
 
         assertThat(Main.run(args)).isZero();
@@ -64,10 +71,20 @@ class OracleToPostgresSyncTest {
             + " FROM customers WHERE customer_id = 3"))
             .isEqualTo("c3|3.75|2026-01-05 00:00:00|2026-01-02 03:04:05.123456|note 3");
 
-        ora("UPDATE CUSTOMERS SET BALANCE = 0 WHERE CUSTOMER_ID = 1", "DELETE FROM CUSTOMERS WHERE CUSTOMER_ID = 4");
+        ora("UPDATE CUSTOMERS SET BALANCE = 0 WHERE CUSTOMER_ID = 1", "DELETE FROM CUSTOMERS WHERE CUSTOMER_ID = 4",
+            "UPDATE CUSTOMERS SET CUST_NAME = 'bumped', UPDATED_AT = SYSTIMESTAMP WHERE CUSTOMER_ID = 2");
         assertThat(Main.run(args)).isZero();
         assertThat(pg("SELECT balance FROM customers WHERE customer_id = 1")).isEqualTo("0");
         assertThat(pg("SELECT string_agg(customer_id::text, ',' ORDER BY customer_id) FROM customers_active")).isEqualTo("1,2,3,5");
+        assertThat(pg("SELECT cust_name FROM customers_wm WHERE customer_id = 2")).isEqualTo("bumped");
+        assertThat(pg("SELECT string_agg(customer_id::text, ',' ORDER BY customer_id) FROM customers_wm_active"))
+            .as("watermark jobs do not delete").isEqualTo("1,2,3,4,5");
+
+        // the cursor is now past the old rows: a change without a bumped watermark reaches the snapshot job only
+        ora("UPDATE CUSTOMERS SET BALANCE = 99 WHERE CUSTOMER_ID = 3");
+        assertThat(Main.run(args)).isZero();
+        assertThat(pg("SELECT balance FROM customers WHERE customer_id = 3")).isEqualTo("99");
+        assertThat(pg("SELECT balance FROM customers_wm WHERE customer_id = 3")).isEqualTo("3.75");
     }
 
     private static void ora(String... statements) throws SQLException {

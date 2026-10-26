@@ -14,7 +14,7 @@ The full design is in [Design.md](Design.md).
 | M1: engine core and snapshot diff (Oracle and PostgreSQL sources, PostgreSQL sink, YAML CLI) | Done |
 | M4: REST API and management UI | Done |
 | M2: scheduler (cron or interval, skip-on-overlap, jitter, per-connection concurrency cap, lease) | Done in the server; the CLI still runs each job once |
-| M2: watermark and hybrid modes, reconcile | Not started |
+| M2: watermark and hybrid modes, reconcile | Done |
 | M3: webhook sink, retries and dead letters | Not started |
 | M5: Oracle as a sink (MERGE from a global temporary table; Oracle 11g and later) | Done |
 | M6 to M8: outbox and multi-sink fan-out, hardening, transformations | Not started |
@@ -69,6 +69,17 @@ Other endpoints:
 3. Active jobs run on their schedule: every 5 minutes by default, or any interval of at least 10 seconds or a
    cron expression (server time zone). Click **Run now** on the job page to run one immediately. A scheduled run
    is skipped while the previous one is still going. Missing target tables are created on the first run.
+
+Each job picks how it finds changes:
+
+| Mode | Each run reads | Deletes | Use when |
+|---|---|---|---|
+| **Snapshot diff** (default) | The whole source | Detected every run | Up to a few hundred thousand rows, or no update column (typical for views) |
+| **Watermark** | Rows whose watermark column (an update time or increasing id) is at or after the last value seen, minus an overlap window (default 5 min) | Never | Large tables with a reliable update column, where deletes do not matter |
+| **Hybrid** | As Watermark, plus a full comparison (**reconcile**) on its own cron | At each reconcile | Large tables that need deletes and a safety net for missed updates |
+
+Rows whose watermark is NULL are only picked up by reconciles. **Reconcile** on the job page (or
+`--reconcile` on the CLI) runs one on demand.
 
 Deletes are **soft** by default: the target row stays, with `_deleted_at` and `_is_deleted` set. If the row
 comes back at the source, both are cleared. When a run would delete more than the job's **delete guard**
@@ -137,9 +148,9 @@ cd datasync-ui && npm run gen:api
 
 | Where | What it covers |
 |---|---|
-| `datasync-core` | Snapshot-diff logic against fake connectors, config loading |
+| `datasync-core` | Snapshot-diff and watermark logic against fake connectors, config loading |
 | `datasync-dialect-*` | SQL generation, type mapping, `COPY` escaping |
-| `datasync-cli` | End to end through the CLI: Postgres to Postgres, and Oracle to Postgres (Docker) |
+| `datasync-cli` | End to end through the CLI: Postgres to Postgres (snapshot and hybrid), Oracle to Postgres, Postgres to Oracle (Docker) |
 | `datasync-server` | The REST API end to end with a real Postgres (Docker), password hashing |
 | `datasync-ui` | Job form conversion and the YAML view (`npm test`) |
 

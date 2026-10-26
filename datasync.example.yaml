@@ -16,7 +16,9 @@ jobs:
     source: { connection: oracle_prod, object: HR.CUSTOMERS_V }
     keys: [CUSTOMER_ID]               # required for views; tables default to their primary key
     columns: { include: "*", exclude: [], rename: { CUST_NAME: customer_name } }
-    mode: SNAPSHOT_DIFF
+    mode: SNAPSHOT_DIFF               # or WATERMARK (read only changed rows) or HYBRID (watermark + reconcile)
+    # watermark: { column: UPDATED_AT, overlap: 5m }   # WATERMARK and HYBRID: an update time or increasing id
+    # reconcile: { cron: "0 2 * * *" }                 # HYBRID: full compare that also applies deletes
     batchSize: 10000
     fetchSize: 5000
     maxDeletePercent: 20

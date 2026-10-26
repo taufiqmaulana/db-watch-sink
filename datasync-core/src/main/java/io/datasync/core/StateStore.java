@@ -20,6 +20,7 @@ import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -146,6 +147,33 @@ public final class StateStore implements AutoCloseable {
                     ps.addBatch();
                 }
                 ps.executeBatch();
+            }
+        });
+    }
+
+    /** The job's watermark cursor, if one was saved for {@code column}. */
+    synchronized Optional<String> cursor(String jobId, String column) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT watermark_value FROM job_cursor WHERE job_id = ? AND watermark_column = ?")) {
+            ps.setString(1, jobId);
+            ps.setString(2, column);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+            }
+        }
+    }
+
+    synchronized void saveCursor(String jobId, String column, String value) throws SQLException {
+        inTransaction(() -> {
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    INSERT INTO job_cursor (job_id, watermark_column, watermark_value, updated_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT (job_id) DO UPDATE SET watermark_column = excluded.watermark_column,
+                      watermark_value = excluded.watermark_value, updated_at = excluded.updated_at""")) {
+                ps.setString(1, jobId);
+                ps.setString(2, column);
+                ps.setString(3, value);
+                ps.setTimestamp(4, Timestamp.from(Instant.now()));
+                ps.executeUpdate();
             }
         });
     }

@@ -1,6 +1,9 @@
 package io.datasync.server;
 
 import io.datasync.core.config.DataSyncConfig.JobDef;
+import io.datasync.core.config.DataSyncConfig.Mode;
+import io.datasync.core.config.DataSyncConfig.ReconcileDef;
+import io.datasync.core.config.DataSyncConfig.WatermarkDef;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -35,7 +38,19 @@ class JobScheduleTest {
         assertThatThrownBy(() -> JobSchedule.of(job("61 * * * *", null))).hasMessageStartingWith("Invalid cron expression '61 * * * *'");
     }
 
+    @Test
+    void onlyHybridJobsReconcileAndTheyMustSayWhen() {
+        assertThat(JobSchedule.reconcile(job(null, null))).isEmpty();
+        assertThat(JobSchedule.reconcile(hybrid("0 2 * * *"))).isPresent();
+        assertThatThrownBy(() -> JobSchedule.reconcile(hybrid(null))).hasMessage("Hybrid jobs need a reconcile schedule");
+    }
+
+    private static JobDef hybrid(String reconcileCron) {
+        return new JobDef("j", null, null, null, Mode.HYBRID, null, null, null, null, null, null, null, null, null,
+            new WatermarkDef("UPDATED_AT", null), new ReconcileDef(reconcileCron));
+    }
+
     private static JobDef job(String cron, String every) {
-        return new JobDef("j", null, null, null, null, null, null, null, null, null, cron, every, null, null);
+        return new JobDef("j", null, null, null, null, null, null, null, null, null, cron, every, null, null, null, null);
     }
 }

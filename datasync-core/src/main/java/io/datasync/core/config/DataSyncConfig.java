@@ -1,5 +1,6 @@
 package io.datasync.core.config;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -31,14 +32,21 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
         String schedule,
         String every,
         Boolean fixedDelay,
-        Integer jitterPercent) {
+        Integer jitterPercent,
+        WatermarkDef watermark,
+        ReconcileDef reconcile) {
 
         /**
          * Scheduling (design 5A): {@code schedule} is a 5-field cron expression; {@code every} is an interval such
          * as {@code 30s}, {@code 5m} or {@code 1h} and takes precedence when set. {@code fixedDelay} measures an
          * interval from the end of a run instead of its start. The CLI ignores these and runs once.
+         * <p>
+         * {@code watermark} is used by WATERMARK and HYBRID jobs, {@code reconcile} by HYBRID ones. Both are always
+         * present; an unset column or cron means "none".
          */
         public JobDef {
+            watermark = Objects.requireNonNullElse(watermark, new WatermarkDef(null, null));
+            reconcile = Objects.requireNonNullElse(reconcile, new ReconcileDef(null));
             schedule = schedule == null || schedule.isBlank() ? "*/5 * * * *" : schedule.trim();
             every = every == null || every.isBlank() ? null : every.trim();
             fixedDelay = Objects.requireNonNullElse(fixedDelay, false);
@@ -55,11 +63,40 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
 
         public JobDef withName(String newName) {
             return new JobDef(newName, source, keys, columns, mode, batchSize, fetchSize, maxDeletePercent, queryTimeoutSeconds, sinks,
-                schedule, every, fixedDelay, jitterPercent);
+                schedule, every, fixedDelay, jitterPercent, watermark, reconcile);
+        }
+
+        /** True for modes that read only rows changed since the last run (WATERMARK, HYBRID). */
+        public boolean incremental() {
+            return mode != Mode.SNAPSHOT_DIFF;
         }
     }
 
     public record SourceDef(String connection, String object) {}
+
+    /**
+     * Design 5.1: {@code column} holds an update timestamp or a monotonic id; {@code overlap} (default 5m) is
+     * re-read before the last value seen, to catch late-committing transactions. It applies to time columns only.
+     */
+    public record WatermarkDef(String column, String overlap) {
+
+        public WatermarkDef {
+            column = column == null || column.isBlank() ? null : column.trim();
+            overlap = overlap == null || overlap.isBlank() ? "5m" : overlap.trim();
+        }
+
+        public Duration overlapDuration() {
+            return Durations.parse(overlap);
+        }
+    }
+
+    /** Design 5.4: when a HYBRID job runs a full snapshot diff, which also applies deletes. */
+    public record ReconcileDef(String cron) {
+
+        public ReconcileDef {
+            cron = cron == null || cron.isBlank() ? null : cron.trim();
+        }
+    }
 
     /** {@code include} is {@code "*"} (default) or a list of source column names. */
     public record ColumnsDef(List<String> include, List<String> exclude, Map<String, String> rename) {
