@@ -37,7 +37,10 @@ export function JobWizardPage() {
   const dirty = form.formState.isDirty;
 
   // each step starts at its top, not where the last one was scrolled to
-  useEffect(() => window.scrollTo({ top: 0 }), [step]);
+  // braces matter: Chromium's scrollTo returns a Promise, which React would call as the effect's cleanup
+  useEffect(() => {
+    window.scrollTo({ top: 0 });
+  }, [step]);
 
   // closing the tab or reloading would lose the edits
   useEffect(() => {
@@ -480,7 +483,9 @@ function renderValue(v: unknown) {
 
 function DryRunStep({ form, preview, saveError }: { form: Form; preview: UseMutationResult<Preview, Error, JobDef>; saveError: unknown }) {
   const { mutate } = preview;
-  useEffect(() => mutate(toJobDef(form.getValues())), [form, mutate]);
+  useEffect(() => {
+    mutate(toJobDef(form.getValues()));
+  }, [form, mutate]);
 
   return (
     <div className="grid grid-cols-1 gap-5">
