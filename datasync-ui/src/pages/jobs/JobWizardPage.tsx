@@ -306,12 +306,22 @@ function SinksStep({ form }: { form: Form }) {
   const { fields, append, remove } = useFieldArray({ control: form.control, name: "sinks" });
   const [hardDeleteFor, setHardDeleteFor] = useState<number | null>(null);
   const errors = form.formState.errors.sinks;
-  const object = form.watch("sourceObject");
-  const suggestedTarget = `public.${(object.split(".").pop() ?? "").toLowerCase()}`;
+  const table = form.watch("sourceObject").split(".").pop() ?? "";
+  /** Where a new target usually goes: the connection user's schema in upper case on Oracle, public on PostgreSQL. */
+  const suggest = (connectionId: string) => {
+    const c = connections.find((x) => x.id === connectionId);
+    return c?.kind === "jdbc-oracle" ? `${c.username ? `${c.username.toUpperCase()}.` : ""}${table.toUpperCase()}` : `public.${table.toLowerCase()}`;
+  };
+  // a target still holding a suggestion follows the connection; one the user typed is kept
+  const isSuggestion = (target: string) => !target || target === suggest("") || connections.some((c) => target === suggest(c.id));
 
+  // fill empty targets once, on entering the step, so clearing a field to retype it is not undone
+  const filled = useRef(false);
   useEffect(() => {
-    form.getValues("sinks").forEach((s, i) => !s.target && form.setValue(`sinks.${i}.target`, suggestedTarget));
-  }, [form, suggestedTarget]);
+    if (filled.current || connections.length === 0) return;
+    filled.current = true;
+    form.getValues("sinks").forEach((s, i) => !s.target && form.setValue(`sinks.${i}.target`, suggest(s.connection)));
+  });
 
   return (
     <div className="grid gap-4">
@@ -332,7 +342,14 @@ function SinksStep({ form }: { form: Form }) {
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Connection" error={e?.connection?.message}>
                 {(id) => (
-                  <Select id={id} {...form.register(`sinks.${i}.connection`)}>
+                  <Select
+                    id={id}
+                    {...form.register(`sinks.${i}.connection`, {
+                      onChange: (ev) =>
+                        isSuggestion(form.getValues(`sinks.${i}.target`)) &&
+                        form.setValue(`sinks.${i}.target`, suggest(ev.target.value), { shouldValidate: true }),
+                    })}
+                  >
                     <option value="">Choose…</option>
                     {connections.map((c) => (
                       <option key={c.id} value={c.id}>
@@ -394,7 +411,7 @@ function SinksStep({ form }: { form: Form }) {
         );
       })}
       <div>
-        <Button variant="outline" onClick={() => append(newSink(suggestedTarget))}>
+        <Button variant="outline" onClick={() => append(newSink(suggest("")))}>
           <Plus aria-hidden /> Add sink
         </Button>
       </div>
