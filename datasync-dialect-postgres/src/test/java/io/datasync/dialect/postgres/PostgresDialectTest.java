@@ -2,6 +2,7 @@ package io.datasync.dialect.postgres;
 
 import io.datasync.api.ObjectRef;
 import io.datasync.api.ReadSpec;
+import io.datasync.api.WatermarkSpec;
 import io.datasync.jdbc.SqlDialect;
 import org.junit.jupiter.api.Test;
 
@@ -24,7 +25,18 @@ class PostgresDialectTest {
         assertThat(dialect.keysetQuery(spec, true))
             .isEqualTo("SELECT \"a\", \"b\", \"v\" FROM \"src\".\"orders\" WHERE (\"a\" > ?) OR (\"a\" = ? AND \"b\" > ?)"
                 + " ORDER BY \"a\", \"b\" FETCH FIRST 500 ROWS ONLY");
-        assertThat(SqlDialect.keysetBinds(List.of(1, 2))).containsExactly(1, 1, 2);
+        assertThat(SqlDialect.keysetBinds(spec, List.of(1, 2))).containsExactly(1, 1, 2);
+    }
+
+    @Test
+    void watermarkScanFiltersFromTheBoundAndOrdersByTheWatermarkFirst() {
+        ReadSpec spec = new ReadSpec(ObjectRef.parse("t"), List.of("id", "ts"), List.of("ts", "id"), 100, 500, Duration.ofSeconds(5),
+            new WatermarkSpec("ts", 42L));
+
+        assertThat(dialect.keysetQuery(spec, true)).isEqualTo("SELECT \"id\", \"ts\" FROM \"t\" WHERE \"ts\" IS NOT NULL AND \"ts\" >= ?"
+            + " AND ((\"ts\" > ?) OR (\"ts\" = ? AND \"id\" > ?)) ORDER BY \"ts\", \"id\" FETCH FIRST 500 ROWS ONLY");
+        assertThat(SqlDialect.keysetBinds(spec, List.of(50L, 7))).containsExactly(42L, 50L, 50L, 7);
+        assertThat(SqlDialect.keysetBinds(spec, null)).containsExactly(42L);
     }
 
     @Test

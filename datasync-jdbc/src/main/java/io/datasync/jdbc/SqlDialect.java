@@ -4,6 +4,7 @@ import io.datasync.api.CanonicalType;
 import io.datasync.api.ObjectRef;
 import io.datasync.api.ReadSpec;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -54,29 +55,40 @@ public interface SqlDialect {
     }
 
     /**
-     * The scan in key order, without a row limit. With {@code afterKey}, it takes one bind per key prefix
-     * (see {@link #keysetBinds}), written out because Oracle has no row-value comparison.
+     * The scan in key order, without a row limit. A watermark adds {@code wm IS NOT NULL} and, with a lower
+     * bound, {@code wm >= ?}. With {@code afterKey}, the keyset condition takes one bind per key prefix, written
+     * out because Oracle has no row-value comparison. {@link #keysetBinds} lists the binds in order.
      */
     default String keysetScan(ReadSpec spec, boolean afterKey) {
         List<String> keys = spec.keyColumns().stream().map(this::quote).toList();
-        StringBuilder sql = new StringBuilder("SELECT ")
-            .append(spec.columns().stream().map(this::quote).collect(Collectors.joining(", ")))
-            .append(" FROM ").append(qualify(spec.object()));
+        List<String> conditions = new ArrayList<>();
+        if (spec.watermark() != null) {
+            String wm = quote(spec.watermark().column());
+            conditions.add(wm + " IS NOT NULL");
+            if (spec.watermark().from() != null) conditions.add(wm + " >= ?");
+        }
         if (afterKey) {
-            sql.append(" WHERE ").append(IntStream.range(0, keys.size())
+            String keyset = IntStream.range(0, keys.size())
                 .mapToObj(i -> "(" + IntStream.rangeClosed(0, i)
                     .mapToObj(j -> keys.get(j) + (j < i ? " = ?" : " > ?"))
                     .collect(Collectors.joining(" AND ")) + ")")
-                .collect(Collectors.joining(" OR ")));
+                .collect(Collectors.joining(" OR "));
+            conditions.add(conditions.isEmpty() ? keyset : "(" + keyset + ")");
         }
+        StringBuilder sql = new StringBuilder("SELECT ")
+            .append(spec.columns().stream().map(this::quote).collect(Collectors.joining(", ")))
+            .append(" FROM ").append(qualify(spec.object()));
+        if (!conditions.isEmpty()) sql.append(" WHERE ").append(String.join(" AND ", conditions));
         return sql.append(" ORDER BY ").append(String.join(", ", keys)).toString();
     }
 
-    /** Bind values for {@link #keysetQuery} with {@code afterKey}: k1, k1 k2, k1 k2 k3, ... */
-    static List<Object> keysetBinds(List<Object> lastKey) {
-        return IntStream.range(0, lastKey.size())
-            .boxed()
-            .flatMap(i -> lastKey.subList(0, i + 1).stream())
-            .toList();
+    /** Bind values for {@link #keysetQuery}: the watermark bound if any, then per key prefix k1, k1 k2, k1 k2 k3, ... */
+    static List<Object> keysetBinds(ReadSpec spec, List<Object> lastKey) {
+        List<Object> binds = new ArrayList<>();
+        if (spec.watermark() != null && spec.watermark().from() != null) binds.add(spec.watermark().from());
+        if (lastKey != null) {
+            for (int i = 0; i < lastKey.size(); i++) binds.addAll(lastKey.subList(0, i + 1));
+        }
+        return binds;
     }
 }

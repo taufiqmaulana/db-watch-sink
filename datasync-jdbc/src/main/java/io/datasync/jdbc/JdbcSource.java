@@ -135,10 +135,8 @@ final class JdbcSource implements SourceConnector {
             try (PreparedStatement ps = conn.prepareStatement(dialect.keysetQuery(spec, lastKey != null))) {
                 ps.setFetchSize(spec.fetchSize());
                 ps.setQueryTimeout((int) spec.queryTimeout().toSeconds());
-                if (lastKey != null) {
-                    List<Object> binds = SqlDialect.keysetBinds(lastKey);
-                    for (int i = 0; i < binds.size(); i++) ps.setObject(i + 1, binds.get(i));
-                }
+                List<Object> binds = SqlDialect.keysetBinds(spec, lastKey);
+                for (int i = 0; i < binds.size(); i++) ps.setObject(i + 1, binds.get(i));
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         Map<String, Object> row = new LinkedHashMap<>();
