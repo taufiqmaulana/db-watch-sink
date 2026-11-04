@@ -51,8 +51,9 @@ Open http://localhost:8080 and sign in as `admin`. You are asked to choose a new
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATASYNC_DATA_DIR` | `data` | Holds the SQLite state store: configuration, run history, hash index, users and audit log |
-| `DATASYNC_MASTER_KEY` | generated into `<data dir>/master.key` | AES-256 key (32 bytes, base64) that encrypts stored database passwords. Back it up: without it, stored credentials cannot be decrypted |
+| `DATASYNC_DATA_DIR` | `data` | Holds the SQLite state store: configuration, run history, hash index, outbox, users and audit log |
+| `DATASYNC_MASTER_KEY` | required | AES-256 key (32 bytes, base64) that encrypts stored passwords and secrets. Keep it apart from backups of the data directory: without it, stored credentials cannot be decrypted. The server refuses to start without it |
+| `DATASYNC_ALLOW_KEY_FILE` | `false` | Set to `true` to keep the key in `<data dir>/master.key` instead (generated on first start). Fine for trials; in production the key would end up in every copy of the data. Installs that already use the file can set `DATASYNC_MASTER_KEY` to its content |
 | `DATASYNC_ADMIN_PASSWORD` | random, printed to the log | Password of the `admin` user created on first start |
 | `DATASYNC_LOG_JSON` | `false` | Log as JSON lines, with `jobId` and `runId` on the lines of a run |
 | `QUARKUS_MAILER_HOST`, `_PORT`, `_FROM`, `_USERNAME`, `_PASSWORD`, `_TLS` | none | SMTP server for alert emails. Set them before adding email recipients under **Settings, Alerts and retention** |
@@ -74,6 +75,42 @@ Other endpoints:
 | `datasync_sink_backlog_batches{job,sink}` | Batches queued for the sink |
 | `datasync_dead_letters{job,sink}` | Dead-lettered batches waiting to be retried or discarded |
 | `datasync_skipped_ticks_total{job}` | Scheduled runs skipped because the previous one was still going |
+
+### Deploy with Docker
+
+```sh
+./mvnw install -DskipTests
+docker build -t datasync .
+export DATASYNC_MASTER_KEY=$(openssl rand -base64 32)   # store it in your secret manager
+docker compose up -d                                    # see docker-compose.yml
+```
+
+The image runs as a non-root user, keeps its state in the `/data` volume and listens on 8080. Run one instance per
+data volume (the state store is a single SQLite file), behind a reverse proxy that terminates TLS and sets HSTS.
+Use `/q/health/ready` for load balancer and orchestrator checks; it reports down when the state store does not
+answer.
+
+Security built in: passwords hashed with Argon2id, stored credentials encrypted with AES-GCM, an HttpOnly,
+SameSite=Strict session cookie (8 hours idle), sign-in refused for 15 minutes after 5 failed attempts for a username
+or 20 from one address (recorded in the audit log), and a strict Content-Security-Policy, `X-Frame-Options: DENY`
+and `nosniff` on every response. Keep `/metrics` and `/q/openapi` internal at the proxy.
+
+### Sizing
+
+Measured with 50,000 rows of about 400 bytes, a PostgreSQL sink and a webhook sink, on a laptop
+(`LoadTest`, `./mvnw -pl datasync-cli test -Dtest=LoadTest -Dload=true -DargLine=-Xmx256m`):
+
+| Step | Time |
+|---|---|
+| First run: read and queue every row | 2.5 s |
+| Its delivery to PostgreSQL (50,000 rows) | 2.2 s |
+| A run with nothing changed | 1.0 s |
+| A run with 500 updates, 50 deletes and 50 inserts, and its delivery | 1.2 s |
+| Webhook catching up on 4 queued batches (80 requests of 500 changes) | 1.0 s |
+
+It also completes with a 128 MB heap. The state file was about 56 MB, mostly the hash index. At a 5-minute
+interval a job of this size is idle more than 99% of the time; the default snapshot diff is the right mode up to
+a few hundred thousand rows. A 512 MB container (as in docker-compose.yml) leaves room for several such jobs.
 
 ### Using the UI
 
@@ -165,7 +202,8 @@ first shows what it would create or update; connections and jobs are matched by 
 password keeps the stored one. The API equivalents are `GET /api/v1/export` and
 `POST /api/v1/import?dryRun=true` with the YAML as the body.
 
-For a full backup, copy the data directory (the SQLite file and `master.key`) while the server is stopped.
+For a full backup, copy the data directory while the server is stopped, and keep `DATASYNC_MASTER_KEY` in your
+secret manager, not next to the copy.
 
 Roles:
 
@@ -233,6 +271,7 @@ cd datasync-ui && npm run gen:api
 | `datasync-core` | Snapshot-diff and watermark logic against fake connectors, config loading |
 | `datasync-dialect-*` | SQL generation, type mapping, `COPY` escaping |
 | `datasync-sink-webhook` | Envelope, auth headers and HMAC, retryable and permanent failures, address blocking, against a local HTTP server |
+| `datasync-cli` (`LoadTest`, opt-in) | The sizing figures above |
 | `datasync-cli` | End to end through the CLI: Postgres to Postgres (snapshot and hybrid), Oracle to Postgres, Postgres to Oracle, Postgres to a webhook (Docker) |
 | `datasync-server` | The REST API end to end with a real Postgres (Docker): dead letters and their retry, alerts, metrics, export and import, retention; password hashing |
 | `datasync-ui` | Job form conversion and the YAML view (`npm test`) |
