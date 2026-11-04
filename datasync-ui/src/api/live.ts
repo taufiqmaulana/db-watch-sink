@@ -13,6 +13,7 @@ export function useLiveUpdates() {
       queryClient.invalidateQueries({ queryKey: keys.jobs });
       queryClient.invalidateQueries({ queryKey: keys.overview });
       queryClient.invalidateQueries({ queryKey: ["audit"] });
+      queryClient.invalidateQueries({ queryKey: ["dead-letters"] });
     };
     return () => source.close();
   }, [queryClient]);

@@ -13,6 +13,7 @@ import "./index.css";
 import { ForcedPasswordChangePage, LoginPage } from "./pages/AuthPages";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { DeadLettersPage } from "./pages/DeadLettersPage";
 import { JobDetailPage } from "./pages/jobs/JobDetailPage";
 import { JobsPage } from "./pages/jobs/JobsPage";
 import { JobWizardPage } from "./pages/jobs/JobWizardPage";
@@ -53,6 +54,7 @@ function SignedIn() {
         <Route path="/jobs/new" element={<JobWizardPage />} />
         <Route path="/jobs/:id" element={<JobDetailPage />} />
         <Route path="/jobs/:id/edit" element={<JobWizardPage />} />
+        <Route path="/dead-letters" element={<DeadLettersPage />} />
         <Route path="/connections" element={<ConnectionsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFound />} />

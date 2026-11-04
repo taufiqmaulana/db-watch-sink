@@ -14,8 +14,14 @@ export type AuditEntry = Schemas["Entry"];
 export type Preview = Schemas["Preview"];
 export type ObjectSchema = Schemas["ObjectSchema"];
 
-/** Sink entries are free-form in the API; this is the shape the UI writes for database sinks. */
-export interface JdbcSinkConfig {
+/** What to do with a batch a sink still refuses after its retries (design 6). */
+interface DeliveryConfig {
+  retry?: { maxAttempts?: number; initialBackoff?: string; maxBackoff?: string };
+  onDeadLetter?: "PAUSE" | "SKIP";
+}
+
+/** Sink entries are free-form in the API; these are the shapes the UI writes. */
+export interface JdbcSinkConfig extends DeliveryConfig {
   type: "jdbc";
   connection: string;
   target: string;
@@ -26,6 +32,17 @@ export interface JdbcSinkConfig {
   /** Keep each row's hash in a _row_hash column and skip upserts that would not change the row. */
   rowHash?: boolean;
 }
+
+export interface WebhookSinkConfig extends DeliveryConfig {
+  type: "webhook";
+  connection: string;
+  /** per-batch posts up to maxRows changes a request; per-row posts one. */
+  batch?: { mode?: "per-batch" | "per-row"; maxRows?: number };
+  /** upsert-with-flag sends a delete as the last known row with _is_deleted: true. */
+  deleteAs?: "delete" | "upsert-with-flag";
+}
+
+export type SinkConfig = JdbcSinkConfig | WebhookSinkConfig;
 
 export const api = createClient<paths>({ baseUrl: "" });
 

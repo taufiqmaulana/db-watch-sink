@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { JdbcSinkConfig, JobDef, ObjectSchema, Schemas } from "@/api/client";
+import type { JobDef, ObjectSchema, Schemas, SinkConfig } from "@/api/client";
 
 const DELETE_MODES = ["SOFT", "HARD", "IGNORE"] as const;
 
@@ -17,15 +17,24 @@ const columnSchema = z.object({
   coerce: z.string(),
 });
 
-const sinkSchema = z.object({
-  connection: z.string().min(1, "Choose a connection"),
-  target: z.string().trim().min(1, "Target table is required"),
-  autoCreate: z.boolean(),
-  deleteMode: z.enum(DELETE_MODES),
-  softDeleteColumn: z.string().trim().min(1, "Required"),
-  softDeleteFlagColumn: z.string().trim().min(1, "Required"),
-  rowHash: z.boolean(),
-});
+/** One shape for both sink types, so switching type keeps what was entered; fields of the other type are ignored. */
+const sinkSchema = z
+  .object({
+    type: z.enum(["jdbc", "webhook"]),
+    connection: z.string().min(1, "Choose a connection"),
+    target: z.string().trim(),
+    autoCreate: z.boolean(),
+    deleteMode: z.enum(DELETE_MODES),
+    softDeleteColumn: z.string().trim().min(1, "Required"),
+    softDeleteFlagColumn: z.string().trim().min(1, "Required"),
+    rowHash: z.boolean(),
+    batchMode: z.enum(["per-batch", "per-row"]),
+    maxRows: count(1, 10_000),
+    deleteAs: z.enum(["delete", "upsert-with-flag"]),
+    maxAttempts: count(1, 20),
+    onDeadLetter: z.enum(["PAUSE", "SKIP"]),
+  })
+  .refine((s) => s.type !== "jdbc" || s.target.length > 0, { path: ["target"], message: "Target table is required" });
 
 const CRON_HINT = "Use five fields: minute hour day month weekday";
 const isCron = (s: string) => /^\S+(\s+\S+){4}$/.test(s.trim());
@@ -82,6 +91,20 @@ export function intervalSeconds(text: string) {
   return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2].toLowerCase() as "s" | "m" | "h"];
 }
 
+/** Where a sink writes: its target table, or "webhook". */
+export function sinkTarget(s: JobDef["sinks"][number]) {
+  return s.type === "webhook" ? "webhook" : String(s.target);
+}
+
+/** "soft deletes", or for a webhook "batches of 500, deletes as flagged upserts". */
+export function describeSinkDelivery(s: JobDef["sinks"][number]) {
+  const failed = s.onDeadLetter === "SKIP" ? "skips failed batches" : "pauses on failure";
+  if (s.type !== "webhook") return `${String(s.deleteMode ?? "SOFT").toLowerCase()} deletes, ${failed}`;
+  const w = s as unknown as Extract<SinkConfig, { type: "webhook" }>;
+  const batching = w.batch?.mode === "per-row" ? "one change a request" : `up to ${w.batch?.maxRows ?? 500} changes a request`;
+  return `${batching}, deletes ${w.deleteAs === "upsert-with-flag" ? "as flagged upserts" : "as deletes"}, ${failed}`;
+}
+
 /** "Every 5m", "Every 30s after the previous run ends", or "Cron 0 2 * * *". */
 export function describeSchedule(def: Pick<JobDef, "every" | "schedule" | "fixedDelay">) {
   if (!def.every) return `Cron ${def.schedule}`;
@@ -93,6 +116,7 @@ export type ColumnRow = JobFormValues["columns"][number];
 export type SinkValues = JobFormValues["sinks"][number];
 
 export const newSink = (target = ""): SinkValues => ({
+  type: "jdbc",
   connection: "",
   target,
   autoCreate: true,
@@ -100,7 +124,44 @@ export const newSink = (target = ""): SinkValues => ({
   softDeleteColumn: "_deleted_at",
   softDeleteFlagColumn: "_is_deleted",
   rowHash: false,
+  batchMode: "per-batch",
+  maxRows: 500,
+  deleteAs: "delete",
+  maxAttempts: 5,
+  onDeadLetter: "PAUSE",
 });
+
+function toSinkConfig(s: SinkValues): SinkConfig {
+  const delivery = { retry: { maxAttempts: s.maxAttempts }, onDeadLetter: s.onDeadLetter };
+  if (s.type === "webhook") {
+    return { type: "webhook", connection: s.connection, batch: { mode: s.batchMode, maxRows: s.maxRows }, deleteAs: s.deleteAs, ...delivery };
+  }
+  const { connection, autoCreate, deleteMode, softDeleteColumn, softDeleteFlagColumn, rowHash } = s;
+  return { type: "jdbc", connection, target: s.target.trim(), autoCreate, deleteMode, softDeleteColumn, softDeleteFlagColumn, rowHash, ...delivery };
+}
+
+/** Form values for a stored sink, filling what an older or hand-written config left out. */
+function fromSinkConfig(raw: Partial<SinkConfig>): SinkValues {
+  const d = newSink();
+  const s = raw as Partial<Record<string, unknown>> & Partial<SinkConfig>;
+  const pick = <K extends keyof SinkValues>(k: K) => (s[k] as SinkValues[K] | undefined) ?? d[k];
+  const batch = s.type === "webhook" ? s.batch : undefined;
+  return {
+    type: s.type === "webhook" ? "webhook" : "jdbc",
+    connection: pick("connection"),
+    target: pick("target"),
+    autoCreate: pick("autoCreate"),
+    deleteMode: pick("deleteMode"),
+    softDeleteColumn: pick("softDeleteColumn"),
+    softDeleteFlagColumn: pick("softDeleteFlagColumn"),
+    rowHash: pick("rowHash"),
+    batchMode: batch?.mode ?? d.batchMode,
+    maxRows: batch?.maxRows ?? d.maxRows,
+    deleteAs: pick("deleteAs"),
+    maxAttempts: s.retry?.maxAttempts ?? d.maxAttempts,
+    onDeadLetter: pick("onDeadLetter"),
+  };
+}
 
 export const emptyJob: JobFormValues = {
   name: "",
@@ -135,7 +196,7 @@ export function typeLabel(t: Schemas["CanonicalType"]) {
 const selected = (c: ColumnRow) => c.include || c.key;
 
 export function toJobDef(v: JobFormValues): JobDef {
-  const sinks: JdbcSinkConfig[] = v.sinks.map((s) => ({ type: "jdbc", ...s, target: s.target.trim() }));
+  const sinks = v.sinks.map(toSinkConfig);
   return {
     name: v.name.trim(),
     source: { connection: v.sourceConnection, object: v.sourceObject.trim() },
@@ -168,19 +229,7 @@ export function toJobDef(v: JobFormValues): JobDef {
 
 /** Form values for a stored job. Columns are filled in once the source schema is loaded ({@link columnRows}). */
 export function fromJobDef(def: JobDef): JobFormValues {
-  // keep only the form's fields, filling the ones an older or hand-written config left out
-  const sinks = (def.sinks as unknown as Partial<SinkValues>[]).map((s): SinkValues => {
-    const d = { ...newSink(), ...s };
-    return {
-      connection: d.connection,
-      target: d.target,
-      autoCreate: d.autoCreate,
-      deleteMode: d.deleteMode,
-      softDeleteColumn: d.softDeleteColumn,
-      softDeleteFlagColumn: d.softDeleteFlagColumn,
-      rowHash: d.rowHash,
-    };
-  });
+  const sinks = (def.sinks as unknown as Partial<SinkConfig>[]).map(fromSinkConfig);
   return {
     ...emptyJob,
     name: def.name,

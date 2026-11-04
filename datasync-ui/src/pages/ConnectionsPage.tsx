@@ -17,19 +17,34 @@ import { Card, Empty, PageHeader, Spinner, Table, Td, Th } from "@/components/ui
 export const KINDS = {
   "jdbc-oracle": { label: "Oracle", url: "jdbc:oracle:thin:@//host:1521/SERVICE" },
   "jdbc-postgres": { label: "PostgreSQL", url: "jdbc:postgresql://host:5432/database" },
+  webhook: { label: "Webhook", url: "https://consumer.example.com/datasync" },
+} as const;
+
+/** What the stored secret is, per webhook auth type. */
+const AUTH_TYPES = {
+  NONE: { label: "None", secret: null },
+  BEARER: { label: "Bearer token", secret: "Token" },
+  BASIC: { label: "Basic", secret: "Password" },
+  HMAC: { label: "HMAC signature", secret: "Signing secret" },
 } as const;
 
 const ROLES: Record<Schemas["ConnectionRole"], string> = { SOURCE: "Source", SINK: "Sink", BOTH: "Source and sink" };
 
-const schema = z.object({
-  name: z.string().trim().min(1, "Name is required"),
-  kind: z.enum(["jdbc-oracle", "jdbc-postgres"]),
-  role: z.enum(["SOURCE", "SINK", "BOTH"]),
-  url: z.string().trim().min(1, "JDBC URL is required"),
-  username: z.string().trim(),
-  password: z.string(),
-  maxConcurrency: z.number({ error: "Enter a number" }).int().min(1, "At least 1").max(32, "At most 32"),
-});
+const schema = z
+  .object({
+    name: z.string().trim().min(1, "Name is required"),
+    kind: z.enum(["jdbc-oracle", "jdbc-postgres", "webhook"]),
+    role: z.enum(["SOURCE", "SINK", "BOTH"]),
+    url: z.string().trim().min(1, "URL is required"),
+    username: z.string().trim(),
+    password: z.string(),
+    authType: z.enum(["NONE", "BEARER", "BASIC", "HMAC"]),
+    maxConcurrency: z.number({ error: "Enter a number" }).int().min(1, "At least 1").max(32, "At most 32"),
+  })
+  .refine((v) => v.kind !== "webhook" || /^https?:\/\/.+/i.test(v.url), {
+    path: ["url"],
+    message: "The URL must start with http:// or https://",
+  });
 type Values = z.infer<typeof schema>;
 
 function ConnectionDialog({ connection, open, onOpenChange }: { connection?: ConnectionView; open: boolean; onOpenChange: (o: boolean) => void }) {
@@ -43,14 +58,25 @@ function ConnectionDialog({ connection, open, onOpenChange }: { connection?: Con
       url: connection?.url ?? "",
       username: connection?.username ?? "",
       password: "",
+      authType: (connection?.authType as Values["authType"]) ?? "NONE",
       maxConcurrency: connection?.maxConcurrency ?? 2,
     },
   });
   const save = useMutation({
-    mutationFn: (body: Values) =>
+    mutationFn: (values: Values) => {
+      const webhook = values.kind === "webhook";
+      const body = {
+        ...values,
+        role: webhook ? ("SINK" as const) : values.role,
+        authType: webhook ? values.authType : null,
+        username: webhook && values.authType !== "BASIC" ? "" : values.username,
+      };
+      return (
       connection
         ? call(api.PUT("/api/v1/connections/{id}", { params: { path: { id: connection.id } }, body }))
-        : call(api.POST("/api/v1/connections", { body })),
+        : call(api.POST("/api/v1/connections", { body }))
+      );
+    },
     onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: keys.connections });
       toast.success(`Saved ${saved.name}. Use Test to check it connects.`);
@@ -59,6 +85,9 @@ function ConnectionDialog({ connection, open, onOpenChange }: { connection?: Con
   });
   const { errors } = form.formState;
   const kind = form.watch("kind");
+  const authType = form.watch("authType");
+  const webhook = kind === "webhook";
+  const secretLabel = webhook ? AUTH_TYPES[authType].secret : "Password";
 
   return (
     <Dialog
@@ -68,7 +97,7 @@ function ConnectionDialog({ connection, open, onOpenChange }: { connection?: Con
         onOpenChange(o);
       }}
       title={connection ? `Edit ${connection.name}` : "New connection"}
-      description="Sources only need a read-only account with SELECT."
+      description={webhook ? "A webhook receives changes as JSON; it can only be a sink." : "Sources only need a read-only account with SELECT."}
       footer={
         <>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -86,7 +115,7 @@ function ConnectionDialog({ connection, open, onOpenChange }: { connection?: Con
           {(id) => <Input id={id} placeholder="oracle_prod" {...form.register("name")} />}
         </Field>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Database">
+          <Field label="Type">
             {(id) => (
               <Select id={id} {...form.register("kind")}>
                 {Object.entries(KINDS).map(([value, k]) => (
@@ -97,32 +126,59 @@ function ConnectionDialog({ connection, open, onOpenChange }: { connection?: Con
               </Select>
             )}
           </Field>
-          <Field label="Used as">
-            {(id) => (
-              <Select id={id} {...form.register("role")}>
-                {Object.entries(ROLES).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </Select>
-            )}
-          </Field>
+          {webhook ? (
+            <Field label="Authentication">
+              {(id) => (
+                <Select id={id} {...form.register("authType")}>
+                  {Object.entries(AUTH_TYPES).map(([value, a]) => (
+                    <option key={value} value={value}>
+                      {a.label}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          ) : (
+            <Field label="Used as">
+              {(id) => (
+                <Select id={id} {...form.register("role")}>
+                  {Object.entries(ROLES).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          )}
         </div>
-        <Field label="JDBC URL" error={errors.url?.message}>
+        <Field
+          label={webhook ? "Endpoint URL" : "JDBC URL"}
+          hint={authType === "HMAC" && webhook ? "Requests carry X-DataSync-Signature: sha256=<HMAC of the body>." : undefined}
+          error={errors.url?.message}
+        >
           {(id) => <Input id={id} placeholder={KINDS[kind].url} className="font-mono" {...form.register("url")} />}
         </Field>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Username">
-            {(id) => <Input id={id} autoComplete="off" {...form.register("username")} />}
+        {(!webhook || secretLabel) && (
+          <div className="grid gap-4 sm:grid-cols-2">
+            {(!webhook || authType === "BASIC") && (
+              <Field label="Username">
+                {(id) => <Input id={id} autoComplete="off" {...form.register("username")} />}
+              </Field>
+            )}
+            <Field
+              label={secretLabel ?? "Password"}
+              hint={connection?.hasPassword ? "Leave empty to keep the stored one." : "Stored encrypted, never shown again."}
+            >
+              {(id) => <Input id={id} type="password" autoComplete="new-password" {...form.register("password")} />}
+            </Field>
+          </div>
+        )}
+        {!webhook && (
+          <Field label="Max concurrent queries" hint="Caps the load this service puts on the database." error={errors.maxConcurrency?.message}>
+            {(id) => <Input id={id} type="number" min={1} max={32} className="w-28" {...form.register("maxConcurrency", { valueAsNumber: true })} />}
           </Field>
-          <Field label="Password" hint={connection?.hasPassword ? "Leave empty to keep the stored password." : "Stored encrypted, never shown again."}>
-            {(id) => <Input id={id} type="password" autoComplete="new-password" {...form.register("password")} />}
-          </Field>
-        </div>
-        <Field label="Max concurrent queries" hint="Caps the load this service puts on the database." error={errors.maxConcurrency?.message}>
-          {(id) => <Input id={id} type="number" min={1} max={32} className="w-28" {...form.register("maxConcurrency", { valueAsNumber: true })} />}
-        </Field>
+        )}
       </form>
     </Dialog>
   );
@@ -159,7 +215,7 @@ export function ConnectionsPage() {
     <>
       <PageHeader
         title="Connections"
-        description="Databases that jobs read from and write to."
+        description="Databases that jobs read from and write to, and webhooks they post changes to."
         actions={
           canAdmin && (
             <Button onClick={() => setEditing("new")}>
@@ -179,10 +235,10 @@ export function ConnectionsPage() {
             <thead>
               <tr>
                 <Th>Name</Th>
-                <Th>Database</Th>
+                <Th>Type</Th>
                 <Th>Used as</Th>
                 <Th>URL</Th>
-                <Th>User</Th>
+                <Th>User / auth</Th>
                 <Th className="w-0" />
               </tr>
             </thead>
@@ -208,7 +264,7 @@ export function ConnectionsPage() {
                         </span>
                       )}
                     </Td>
-                    <Td>{c.username ?? "—"}</Td>
+                    <Td>{c.kind === "webhook" ? AUTH_TYPES[c.authType as keyof typeof AUTH_TYPES]?.label ?? "None" : (c.username ?? "—")}</Td>
                     <Td>
                       <div className="flex justify-end gap-1">
                         {canOperate && (

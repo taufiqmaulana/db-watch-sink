@@ -11,6 +11,7 @@ import { Checkbox, Input, Select } from "@/components/ui/form";
 import { Card, Empty, PageHeader, Spinner, Table, Td, Th } from "@/components/ui/layout";
 import { formatRelative } from "@/lib/format";
 import { useConnectionNames, useJobActions } from "./actions";
+import { sinkTarget } from "./jobForm";
 
 const sinkConnections = (job: JobView) => job.config.sinks.map((s) => String(s.connection));
 
@@ -186,7 +187,7 @@ export function JobsPage() {
                     {job.config.sinks.map((s, i) => (
                       <div key={i}>
                         <p>{connectionName(s.connection)}</p>
-                        <p className="font-mono text-xs text-muted-foreground">{String(s.target)}</p>
+                        <p className="font-mono text-xs text-muted-foreground">{sinkTarget(s)}</p>
                       </div>
                     ))}
                   </Td>

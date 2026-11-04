@@ -12,6 +12,8 @@ export const keys = {
   objectSchema: (id: string, name: string) => ["connections", id, "schema", name] as const,
   users: ["users"] as const,
   audit: (entity?: string) => ["audit", entity ?? "all"] as const,
+  deadLetters: (jobId: string, status: string) => ["dead-letters", jobId, status] as const,
+  deadLetter: (id: string) => ["dead-letters", "one", id] as const,
 };
 
 /** The signed-in user, or null when signed out. */
@@ -66,6 +68,12 @@ export const useAudit = (entity?: string) =>
   useQuery({
     queryKey: keys.audit(entity),
     queryFn: () => call(api.GET("/api/v1/audit", { params: { query: { entity, limit: 200 } } })),
+  });
+
+export const useDeadLetters = (jobId: string, status: "OPEN" | "RESOLVED" | "ALL") =>
+  useQuery({
+    queryKey: keys.deadLetters(jobId, status),
+    queryFn: () => call(api.GET("/api/v1/dead-letters", { params: { query: { jobId: jobId || undefined, status, limit: 500 } } })),
   });
 
 export const useObjects = (connectionId: string, schema: string, enabled: boolean) =>

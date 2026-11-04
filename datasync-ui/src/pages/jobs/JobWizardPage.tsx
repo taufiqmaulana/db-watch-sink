@@ -499,7 +499,9 @@ function DetectionStep({ form, lastRowsRead }: { form: Form; lastRowsRead?: numb
 }
 
 function SinksStep({ form }: { form: Form }) {
-  const connections = (useConnections().data ?? []).filter((c) => c.role !== "SOURCE");
+  const sinkConnections = (useConnections().data ?? []).filter((c) => c.role !== "SOURCE");
+  const connections = sinkConnections.filter((c) => c.kind !== "webhook");
+  const webhooks = sinkConnections.filter((c) => c.kind === "webhook");
   const { fields, append, remove } = useFieldArray({ control: form.control, name: "sinks" });
   const [hardDeleteFor, setHardDeleteFor] = useState<number | null>(null);
   const errors = form.formState.errors.sinks;
@@ -517,7 +519,7 @@ function SinksStep({ form }: { form: Form }) {
   useEffect(() => {
     if (filled.current || connections.length === 0) return;
     filled.current = true;
-    form.getValues("sinks").forEach((s, i) => !s.target && form.setValue(`sinks.${i}.target`, suggest(s.connection)));
+    form.getValues("sinks").forEach((s, i) => s.type === "jdbc" && !s.target && form.setValue(`sinks.${i}.target`, suggest(s.connection)));
   });
 
   return (
@@ -526,29 +528,46 @@ function SinksStep({ form }: { form: Form }) {
       {fields.map((f, i) => {
         const e = errors?.[i];
         const deleteMode = form.watch(`sinks.${i}.deleteMode`);
+        const type = form.watch(`sinks.${i}.type`);
+        const batchMode = form.watch(`sinks.${i}.batchMode`);
+        const webhook = type === "webhook";
         return (
           <div key={f.id} className="grid gap-4 rounded-md border border-border p-4">
             <div className="flex items-center justify-between">
-              <p className="text-sm font-medium">Database sink {i + 1}</p>
+              <p className="text-sm font-medium">Sink {i + 1}</p>
               {fields.length > 1 && (
                 <Button size="icon" variant="destructive-ghost" aria-label={`Remove sink ${i + 1}`} onClick={() => remove(i)}>
                   <Trash2 />
                 </Button>
               )}
             </div>
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Field label="Type">
+                {(id) => (
+                  <Select
+                    id={id}
+                    {...form.register(`sinks.${i}.type`, {
+                      onChange: () => form.setValue(`sinks.${i}.connection`, ""),
+                    })}
+                  >
+                    <option value="jdbc">Database table</option>
+                    <option value="webhook">Webhook</option>
+                  </Select>
+                )}
+              </Field>
               <Field label="Connection" error={e?.connection?.message}>
                 {(id) => (
                   <Select
                     id={id}
                     {...form.register(`sinks.${i}.connection`, {
                       onChange: (ev) =>
+                        !webhook &&
                         isSuggestion(form.getValues(`sinks.${i}.target`)) &&
                         form.setValue(`sinks.${i}.target`, suggest(ev.target.value), { shouldValidate: true }),
                     })}
                   >
-                    <option value="">Choose…</option>
-                    {connections.map((c) => (
+                    <option value="">{(webhook ? webhooks : connections).length ? "Choose…" : `No ${webhook ? "webhook" : "database"} connections yet`}</option>
+                    {(webhook ? webhooks : connections).map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -556,10 +575,52 @@ function SinksStep({ form }: { form: Form }) {
                   </Select>
                 )}
               </Field>
-              <Field label="Target table" hint="Schema-qualified, e.g. public.customers." error={e?.target?.message}>
-                {(id) => <Input id={id} className="font-mono" {...form.register(`sinks.${i}.target`)} />}
-              </Field>
+              {webhook ? (
+                <Field label="Requests" error={e?.maxRows?.message}>
+                  {(id) => (
+                    <div className="flex gap-2">
+                      <Select id={id} {...form.register(`sinks.${i}.batchMode`)}>
+                        <option value="per-batch">Batches of</option>
+                        <option value="per-row">One change each</option>
+                      </Select>
+                      {batchMode === "per-batch" && (
+                        <Input
+                          type="number"
+                          min={1}
+                          max={10_000}
+                          aria-label="Changes per request"
+                          className="w-24"
+                          {...form.register(`sinks.${i}.maxRows`, { valueAsNumber: true })}
+                        />
+                      )}
+                    </div>
+                  )}
+                </Field>
+              ) : (
+                <Field label="Target table" hint="Schema-qualified, e.g. public.customers." error={e?.target?.message}>
+                  {(id) => <Input id={id} className="font-mono" {...form.register(`sinks.${i}.target`)} />}
+                </Field>
+              )}
             </div>
+            {webhook && (
+              <Field
+                label="Deletes"
+                hint={
+                  form.watch(`sinks.${i}.deleteAs`) === "delete"
+                    ? 'Sent as op "delete" with the key only.'
+                    : 'Sent as op "upsert" with the last row seen and "_is_deleted": true, for consumers that only upsert.'
+                }
+              >
+                {(id) => (
+                  <Select id={id} className="sm:w-72" {...form.register(`sinks.${i}.deleteAs`)}>
+                    <option value="delete">Send a delete</option>
+                    <option value="upsert-with-flag">Send the row flagged as deleted</option>
+                  </Select>
+                )}
+              </Field>
+            )}
+            {!webhook && (
+            <>
             <label className="flex items-center gap-2 text-sm">
               <Checkbox {...form.register(`sinks.${i}.autoCreate`)} />
               Create the target table if it does not exist
@@ -613,6 +674,34 @@ function SinksStep({ form }: { form: Form }) {
                 </div>
               </details>
             )}
+            </>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field
+                label="Attempts per batch"
+                hint="Failures that may pass, like timeouts or HTTP 503, are retried with growing waits."
+                error={e?.maxAttempts?.message}
+              >
+                {(id) => (
+                  <Input id={id} type="number" min={1} max={20} className="w-24" {...form.register(`sinks.${i}.maxAttempts`, { valueAsNumber: true })} />
+                )}
+              </Field>
+              <Field
+                label="When a batch still fails"
+                hint={
+                  form.watch(`sinks.${i}.onDeadLetter`) === "PAUSE"
+                    ? "The batch goes to the dead letters and the job pauses until you resume it."
+                    : "The batch goes to the dead letters and the run carries on with the next one."
+                }
+              >
+                {(id) => (
+                  <Select id={id} {...form.register(`sinks.${i}.onDeadLetter`)}>
+                    <option value="PAUSE">Pause the job</option>
+                    <option value="SKIP">Skip it and carry on</option>
+                  </Select>
+                )}
+              </Field>
+            </div>
           </div>
         );
       })}

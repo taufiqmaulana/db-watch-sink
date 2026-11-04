@@ -15,7 +15,7 @@ import { Tabs } from "@/components/ui/tabs";
 import { formatDateTime, formatDuration, formatNumber, formatRelative } from "@/lib/format";
 import { toYaml } from "@/lib/yaml";
 import { nextRunLabel, useConnectionNames, useJobActions } from "./actions";
-import { describeMode, describeSchedule } from "./jobForm";
+import { describeMode, describeSchedule, describeSinkDelivery, sinkTarget } from "./jobForm";
 
 // Recharts is large; load it only when a job page shows the chart
 const RunsChart = lazy(() => import("./RunsChart"));
@@ -225,8 +225,7 @@ function Overview({ job, runs }: { job: JobView; runs: RunView[] }) {
           <Stat label="Sinks">
             {c.sinks.map((s, i) => (
               <p key={i}>
-                {connectionName(s.connection)} · <span className="font-mono text-xs">{String(s.target)}</span> ·{" "}
-                {String(s.deleteMode ?? "SOFT").toLowerCase()} deletes
+                {connectionName(s.connection)} · <span className="font-mono text-xs">{sinkTarget(s)}</span> · {describeSinkDelivery(s)}
               </p>
             ))}
           </Stat>

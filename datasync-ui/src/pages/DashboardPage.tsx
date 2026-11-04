@@ -48,7 +48,7 @@ export function DashboardPage() {
       <PageHeader title="Dashboard" description="Health of every sync job at a glance." />
       <ErrorAlert error={overview.error ?? jobs.error} />
       {o && (
-        <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-6">
+        <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
           <Tile label="Active jobs" value={formatNumber(o.active)} note={`${o.jobs} total, ${o.paused} paused`} to="/jobs?status=ACTIVE" />
           <Tile label="Running now" value={formatNumber(o.running)} />
           <Tile
@@ -58,6 +58,13 @@ export function DashboardPage() {
             to={o.needsReview > 0 ? "/jobs?status=NEEDS_REVIEW" : undefined}
           />
           <Tile label="Failing" value={formatNumber(o.failing)} note="Last run failed" tone={o.failing > 0 ? "critical" : undefined} />
+          <Tile
+            label="Dead letters"
+            value={formatNumber(o.openDeadLetters)}
+            note="Batches waiting for a retry"
+            tone={o.openDeadLetters > 0 ? "critical" : undefined}
+            to="/dead-letters"
+          />
           <Tile label="Runs (24 h)" value={formatNumber(o.runs24h)} note={`${o.failedRuns24h} failed`} />
           <Tile label="Rows changed (24 h)" value={formatNumber(o.rowsChanged24h)} note="Upserts and deletes" />
         </div>

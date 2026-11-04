@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Cable, Database, KeyRound, LayoutDashboard, ListChecks, LogOut, Settings } from "lucide-react";
+import { Cable, Database, Inbox, KeyRound, LayoutDashboard, ListChecks, LogOut, Settings } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { api, call } from "@/api/client";
@@ -11,6 +11,7 @@ import { Dialog } from "./ui/dialog";
 const nav = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/jobs", label: "Jobs", icon: ListChecks },
+  { to: "/dead-letters", label: "Dead letters", icon: Inbox },
   { to: "/connections", label: "Connections", icon: Cable },
   { to: "/settings", label: "Settings", icon: Settings },
 ];

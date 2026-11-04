@@ -89,4 +89,19 @@ describe("job form", () => {
     expect(columnRows(schema, def)).toEqual(columns);
     expect(fromJobDef(def)).toMatchObject({ name: "customers", sourceConnection: "c1", sinks: [{ connection: "c2" }] });
   });
+
+  it("writes webhook sinks without table settings and reads them back", () => {
+    const webhook = { ...newSink(), type: "webhook" as const, connection: "h1", batchMode: "per-row" as const, deleteAs: "upsert-with-flag" as const };
+    const def = toJobDef({ ...emptyJob, sinks: [{ ...webhook, maxAttempts: 3, onDeadLetter: "SKIP" }] });
+
+    expect(def.sinks[0]).toEqual({
+      type: "webhook",
+      connection: "h1",
+      batch: { mode: "per-row", maxRows: 500 },
+      deleteAs: "upsert-with-flag",
+      retry: { maxAttempts: 3 },
+      onDeadLetter: "SKIP",
+    });
+    expect(fromJobDef(def).sinks[0]).toEqual({ ...webhook, maxAttempts: 3, onDeadLetter: "SKIP" });
+  });
 });
