@@ -26,7 +26,8 @@ import java.util.function.Function;
 final class SinkDelivery {
 
     private static final Logger log = LoggerFactory.getLogger(SinkDelivery.class);
-    private static final int PAGE = 20;
+    /** Batches loaded at a time: one, since a batch can hold batchSize rows of JSON. */
+    private static final int PAGE = 1;
 
     private final StateStore state;
     private final Outbox outbox;
