@@ -77,13 +77,15 @@ public final class PostgresDialect implements SqlDialect {
     }
 
     @Override
-    public String upsertSql(ObjectRef target, String staging, List<String> cols, List<String> keys) {
+    public String upsertSql(ObjectRef target, String staging, List<String> cols, List<String> keys, List<String> changeCols) {
         String colList = cols.stream().map(this::quote).collect(Collectors.joining(", "));
         String updates = cols.stream().filter(c -> !keys.contains(c)).map(this::quote)
             .map(c -> c + " = EXCLUDED." + c).collect(Collectors.joining(", "));
-        return "INSERT INTO " + qualify(target) + " (" + colList + ") SELECT " + colList + " FROM " + staging
+        String when = changeCols.stream().map(this::quote).map(c -> "t." + c + " IS DISTINCT FROM EXCLUDED." + c)
+            .collect(Collectors.joining(" OR "));
+        return "INSERT INTO " + qualify(target) + " AS t (" + colList + ") SELECT " + colList + " FROM " + staging
             + " ON CONFLICT (" + keys.stream().map(this::quote).collect(Collectors.joining(", ")) + ")"
-            + (updates.isEmpty() ? " DO NOTHING" : " DO UPDATE SET " + updates);
+            + (updates.isEmpty() ? " DO NOTHING" : " DO UPDATE SET " + updates + (when.isEmpty() ? "" : " WHERE " + when));
     }
 
     @Override

@@ -43,7 +43,9 @@ class OracleDialectTest {
 
     @Test
     void mergesFromStagingAndNeverUpdatesKeys() {
-        assertThat(dialect.upsertSql(ObjectRef.parse("HR.T"), "\"DS_STG_1\"", List.of("ID", "NAME"), List.of("ID"))).isEqualTo(
+        assertThat(dialect.upsertSql(ObjectRef.parse("HR.T"), "\"DS_STG_1\"", List.of("ID", "H"), List.of("ID"), List.of("H")))
+            .contains(" WHEN MATCHED THEN UPDATE SET t.\"H\" = s.\"H\" WHERE DECODE(t.\"H\", s.\"H\", 0, 1) = 1 WHEN NOT MATCHED");
+        assertThat(dialect.upsertSql(ObjectRef.parse("HR.T"), "\"DS_STG_1\"", List.of("ID", "NAME"), List.of("ID"), List.of())).isEqualTo(
             "MERGE INTO \"HR\".\"T\" t USING \"DS_STG_1\" s ON (t.\"ID\" = s.\"ID\")"
                 + " WHEN MATCHED THEN UPDATE SET t.\"NAME\" = s.\"NAME\""
                 + " WHEN NOT MATCHED THEN INSERT (\"ID\", \"NAME\") VALUES (s.\"ID\", s.\"NAME\")");

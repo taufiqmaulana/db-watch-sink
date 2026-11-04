@@ -36,8 +36,11 @@ public interface SqlDialect {
 
     String currentTimeSql();
 
-    /** Inserts or updates {@code target} from {@code staging}, matching on {@code keys}. */
-    String upsertSql(ObjectRef target, String staging, List<String> cols, List<String> keys);
+    /**
+     * Inserts or updates {@code target} from {@code staging}, matching on {@code keys}. An existing row is updated
+     * only when one of {@code changeCols} differs (NULLs compare equal); with none, always.
+     */
+    String upsertSql(ObjectRef target, String staging, List<String> cols, List<String> keys, List<String> changeCols);
 
     BulkLoader bulkLoader();
 

@@ -35,8 +35,8 @@ class PostgresSyncTest {
             "DROP TABLE IF EXISTS public.customers CASCADE",
             "CREATE SCHEMA src",
             "CREATE TABLE src.customers (customer_id int PRIMARY KEY, cust_name varchar(50), balance numeric(12,2),"
-                + " updated_at timestamp, photo bytea)",
-            "INSERT INTO src.customers SELECT g, 'c' || g, 10.5, now(), '\\x01' FROM generate_series(1, 5) g");
+                + " updated_at timestamp, photo bytea, active numeric(1))",
+            "INSERT INTO src.customers SELECT g, 'c' || g, 10.5, now(), '\\x01', g % 2 FROM generate_series(1, 5) g");
         config = dir.resolve("datasync.yaml");
         Files.writeString(config, """
             connections:
@@ -45,11 +45,11 @@ class PostgresSyncTest {
             jobs:
               - name: customers_sync
                 source: { connection: pg_src, object: src.customers }
-                columns: { include: "*", rename: { cust_name: customer_name } }
+                columns: { include: "*", rename: { cust_name: customer_name }, coerce: { active: BOOLEAN } }
                 maxDeletePercent: 40
                 batchSize: 2
                 sinks:
-                  - { type: jdbc, connection: pg_dw, target: public.customers }
+                  - { type: jdbc, connection: pg_dw, target: public.customers, rowHash: true }
             """.formatted(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
     }
 
@@ -59,20 +59,34 @@ class PostgresSyncTest {
         assertThat(query("SELECT count(*) FROM public.customers WHERE NOT _is_deleted")).isEqualTo("5");
         assertThat(query("SELECT string_agg(column_name, ',' ORDER BY ordinal_position) FROM information_schema.columns"
             + " WHERE table_name = 'customers' AND table_schema = 'public'"))
-            .isEqualTo("customer_id,customer_name,balance,updated_at,_deleted_at,_is_deleted");
+            .isEqualTo("customer_id,customer_name,balance,updated_at,active,_deleted_at,_is_deleted,_row_hash");
+        assertThat(query("SELECT active::text || ' ' || length(_row_hash) FROM public.customers WHERE customer_id = 1"))
+            .as("NUMERIC(1) coerced to BOOLEAN; hash stored").isEqualTo("true 32");
 
         sql("UPDATE src.customers SET cust_name = 'renamed' WHERE customer_id = 2",
             "DELETE FROM src.customers WHERE customer_id = 5",
-            "INSERT INTO src.customers VALUES (6, 'new', 1, now(), null)");
+            "INSERT INTO src.customers VALUES (6, 'new', 1, now(), null, 0)");
         assertThat(run()).isZero();
         assertThat(query("SELECT customer_name FROM public.customers WHERE customer_id = 2")).isEqualTo("renamed");
         assertThat(query("SELECT _is_deleted AND _deleted_at IS NOT NULL FROM public.customers WHERE customer_id = 5")).isEqualTo("t");
         assertThat(query("SELECT string_agg(customer_id::text, ',' ORDER BY customer_id) FROM public.customers_active")).isEqualTo("1,2,3,4,6");
 
-        sql("INSERT INTO src.customers VALUES (5, 'back', 2, now(), null)");
+        sql("INSERT INTO src.customers VALUES (5, 'back', 2, now(), null, 1)");
         assertThat(run()).isZero();
         assertThat(query("SELECT customer_name || ' ' || _is_deleted || ' ' || coalesce(_deleted_at::text, 'null')"
             + " FROM public.customers WHERE customer_id = 5")).isEqualTo("back false null");
+
+        // with rowHash, a row that comes back unchanged is still un-flagged...
+        sql("CREATE TABLE src.saved AS SELECT * FROM src.customers WHERE customer_id = 3", "DELETE FROM src.customers WHERE customer_id = 3");
+        assertThat(run()).isZero();
+        sql("INSERT INTO src.customers SELECT * FROM src.saved");
+        assertThat(run()).isZero();
+        assertThat(query("SELECT _is_deleted FROM public.customers WHERE customer_id = 3")).isEqualTo("f");
+        // ...and a full re-send (here: lost state) leaves unchanged rows unwritten
+        String version = query("SELECT xmin::text FROM public.customers WHERE customer_id = 1");
+        for (String f : new String[] {"state.db", "state.db-wal", "state.db-shm"}) Files.deleteIfExists(dir.resolve(f));
+        assertThat(run()).isZero();
+        assertThat(query("SELECT xmin::text FROM public.customers WHERE customer_id = 1")).isEqualTo(version);
 
         sql("DELETE FROM src.customers WHERE customer_id <= 3");
         assertThat(run()).as("delete guard: 3 of 6 is over 40%").isEqualTo(2);

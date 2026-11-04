@@ -28,7 +28,8 @@ import java.util.stream.Stream;
 /**
  * Loads each batch into staging tables, then upserts and deletes from them in one target transaction.
  * Deletes are soft by default: {@code _deleted_at} and {@code _is_deleted} are set together, and a later
- * upsert of the same key clears both.
+ * upsert of the same key clears both. With {@code rowHash: true}, a {@code _row_hash} column holds each row's
+ * hash and an upsert leaves unchanged rows alone (design 8.1), sparing re-sent batches and full loads the writes.
  */
 final class JdbcSink implements Sink {
 
@@ -42,9 +43,11 @@ final class JdbcSink implements Sink {
     private DeleteMode deleteMode;
     private String deletedAt;
     private String isDeleted;
+    private String rowHash;           // null without the rowHash option
     private List<String> fields;      // column names of incoming rows
     private List<String> keyFields;
-    private List<String> writeCols;   // target columns written by an upsert, soft-delete flags included
+    private List<String> writeCols;   // target columns written by an upsert, soft-delete flags and row hash included
+    private List<String> changeCols;  // an existing row is updated only when one of these differs; empty: always
     private List<String> keyCols;
 
     JdbcSink(String kind, SqlDialect dialect, HikariDataSource pool) {
@@ -68,12 +71,17 @@ final class JdbcSink implements Sink {
         deleteMode = DeleteMode.valueOf(cfg.getOrDefault("deleteMode", "SOFT").toString().toUpperCase());
         deletedAt = dialect.normalizeIdentifier(cfg.getOrDefault("softDeleteColumn", "_deleted_at").toString());
         isDeleted = dialect.normalizeIdentifier(cfg.getOrDefault("softDeleteFlagColumn", "_is_deleted").toString());
+        rowHash = Boolean.parseBoolean(cfg.getOrDefault("rowHash", "false").toString())
+            ? dialect.normalizeIdentifier(cfg.getOrDefault("rowHashColumn", "_row_hash").toString()) : null;
 
         fields = schema.columns().stream().map(Column::name).toList();
         keyFields = schema.keyColumns();
         keyCols = keyFields.stream().map(dialect::normalizeIdentifier).toList();
         Stream<String> dataCols = fields.stream().map(dialect::normalizeIdentifier);
-        writeCols = (deleteMode == DeleteMode.SOFT ? Stream.concat(dataCols, Stream.of(deletedAt, isDeleted)) : dataCols).toList();
+        Stream<String> flags = deleteMode == DeleteMode.SOFT ? Stream.of(deletedAt, isDeleted) : Stream.empty();
+        writeCols = Stream.of(dataCols, flags, Stream.ofNullable(rowHash)).flatMap(c -> c).toList();
+        // a soft-deleted row whose data comes back unchanged must still be un-flagged
+        changeCols = rowHash == null ? List.of() : deleteMode == DeleteMode.SOFT ? List.of(rowHash, isDeleted) : List.of(rowHash);
 
         try (Connection c = pool.getConnection()) {
             Set<String> existing = targetColumns(c);
@@ -108,6 +116,7 @@ final class JdbcSink implements Sink {
                     values.add(null);
                     values.add(false);
                 }
+                if (rowHash != null) values.add(ch.rowHash());
                 upserts.add(values);
             } else if (deleteMode != DeleteMode.IGNORE) {
                 deletes.add(keyFields.stream().map(ch.key()::get).toList());
@@ -117,7 +126,7 @@ final class JdbcSink implements Sink {
         try (Connection c = pool.getConnection(); Statement st = c.createStatement()) {
             BulkLoader loader = dialect.bulkLoader();
             if (!upserts.isEmpty()) {
-                st.executeUpdate(dialect.upsertSql(target, loader.stage(c, target, writeCols, upserts), writeCols, keyCols));
+                st.executeUpdate(dialect.upsertSql(target, loader.stage(c, target, writeCols, upserts), writeCols, keyCols, changeCols));
             }
             if (!deletes.isEmpty()) {
                 st.executeUpdate(deleteSql(loader.stage(c, target, keyCols, deletes)));
@@ -186,6 +195,8 @@ final class JdbcSink implements Sink {
                 + " DEFAULT " + dialect.booleanLiteral(false) + " NOT NULL"
                 + " CHECK (" + flag + " IN (" + dialect.booleanLiteral(true) + ", " + dialect.booleanLiteral(false) + "))");
         }
+        // the row hash is 16 bytes, hex encoded
+        if (rowHash != null) defs.add(dialect.quote(rowHash) + " " + dialect.nativeType(new CanonicalType(CanonicalType.Kind.STRING, 32, 0)));
         defs.add("PRIMARY KEY (" + keyCols.stream().map(dialect::quote).collect(Collectors.joining(", ")) + ")");
 
         try (Statement st = c.createStatement()) {

@@ -41,9 +41,11 @@ class PostgresDialectTest {
 
     @Test
     void upsertUpdatesNonKeyColumns() {
-        assertThat(dialect.upsertSql(ObjectRef.parse("public.t"), "\"stg\"", List.of("id", "name"), List.of("id")))
-            .isEqualTo("INSERT INTO \"public\".\"t\" (\"id\", \"name\") SELECT \"id\", \"name\" FROM \"stg\""
+        assertThat(dialect.upsertSql(ObjectRef.parse("public.t"), "\"stg\"", List.of("id", "name"), List.of("id"), List.of()))
+            .isEqualTo("INSERT INTO \"public\".\"t\" AS t (\"id\", \"name\") SELECT \"id\", \"name\" FROM \"stg\""
                 + " ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\"");
+        assertThat(dialect.upsertSql(ObjectRef.parse("t"), "\"stg\"", List.of("id", "h"), List.of("id"), List.of("h")))
+            .endsWith(" DO UPDATE SET \"h\" = EXCLUDED.\"h\" WHERE t.\"h\" IS DISTINCT FROM EXCLUDED.\"h\"");
     }
 
     @Test

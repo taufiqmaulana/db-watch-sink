@@ -106,13 +106,16 @@ public final class OracleDialect implements SqlDialect {
     }
 
     @Override
-    public String upsertSql(ObjectRef target, String staging, List<String> cols, List<String> keys) {
+    public String upsertSql(ObjectRef target, String staging, List<String> cols, List<String> keys, List<String> changeCols) {
         Function<String, String> source = c -> "s." + quote(c);
         String on = keys.stream().map(k -> "t." + quote(k) + " = " + source.apply(k)).collect(Collectors.joining(" AND "));
         String updates = cols.stream().filter(c -> !keys.contains(c))
             .map(c -> "t." + quote(c) + " = " + source.apply(c)).collect(Collectors.joining(", "));
+        // DECODE compares NULLs as equal, on every Oracle version
+        String when = changeCols.stream().map(c -> "DECODE(t." + quote(c) + ", " + source.apply(c) + ", 0, 1) = 1")
+            .collect(Collectors.joining(" OR "));
         return "MERGE INTO " + qualify(target) + " t USING " + staging + " s ON (" + on + ")"
-            + (updates.isEmpty() ? "" : " WHEN MATCHED THEN UPDATE SET " + updates)
+            + (updates.isEmpty() ? "" : " WHEN MATCHED THEN UPDATE SET " + updates + (when.isEmpty() ? "" : " WHERE " + when))
             + " WHEN NOT MATCHED THEN INSERT (" + cols.stream().map(this::quote).collect(Collectors.joining(", ")) + ")"
             + " VALUES (" + cols.stream().map(source).collect(Collectors.joining(", ")) + ")";
     }

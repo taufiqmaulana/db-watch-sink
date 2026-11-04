@@ -53,7 +53,7 @@ class PostgresToOracleSyncTest {
                 maxDeletePercent: 50
                 batchSize: 2
                 sinks:
-                  - { type: jdbc, connection: ora, target: %s.items }
+                  - { type: jdbc, connection: ora, target: %s.items, rowHash: true }
               - name: tags_sync
                 source: { connection: pg, object: public.tags }
                 maxDeletePercent: 50
@@ -68,7 +68,7 @@ class PostgresToOracleSyncTest {
             + " FROM user_tab_columns WHERE table_name = 'ITEMS'"))
             .isEqualTo("ID:NUMBER,CODE:VARCHAR2,NOTE:CLOB,AMOUNT:NUMBER,RATIO:BINARY_DOUBLE,ACTIVE:CHAR,BORN:DATE,"
                 + "SEEN:TIMESTAMP(6),SEEN_TZ:TIMESTAMP(6) WITH TIME ZONE,UID:VARCHAR2,PAYLOAD:CLOB,DATA:BLOB,"
-                + "_DELETED_AT:TIMESTAMP(6) WITH TIME ZONE,_IS_DELETED:CHAR");
+                + "_DELETED_AT:TIMESTAMP(6) WITH TIME ZONE,_IS_DELETED:CHAR,_ROW_HASH:VARCHAR2");
         assertThat(ora("SELECT code || '|' || NVL(TO_CHAR(DBMS_LOB.GETLENGTH(note)), 'null') || '|' || amount || '|' || active"
             + " || '|' || TO_CHAR(seen, 'YYYY-MM-DD HH24:MI:SS.FF6') || '|' || RAWTOHEX(DBMS_LOB.SUBSTR(data, 16, 1)) || '|' || \"_IS_DELETED\""
             + " FROM items WHERE id = 2")).isEqualTo("C2|5000|3|Y|2026-01-02 03:04:05.123456|0102|N");
