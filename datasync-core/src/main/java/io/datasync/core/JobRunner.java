@@ -27,7 +27,10 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/** Opens a configured job, runs it once and records the outcome in the state store. */
+/**
+ * Runs a configured job once and records the outcome in the state store. A run queues its changes in the job's
+ * outbox; {@link #deliver} then sends them to one sink, and {@link #deliverAll} to every sink.
+ */
 public final class JobRunner {
 
     private static final Logger log = LoggerFactory.getLogger(JobRunner.class);
@@ -50,30 +53,51 @@ public final class JobRunner {
         MDC.put("runId", runId);
         RunState outcome = RunState.SUCCEEDED;
         String error = null;
-        boolean pauseJob = false;
         try (Job job = open(def)) {
             diff.run(job, kind, allowDeletes);
         } catch (DeleteGuardException e) {
             outcome = RunState.NEEDS_REVIEW;
             error = e.getMessage();
-        } catch (DeadLetterPause e) {
-            outcome = RunState.FAILED;
-            error = e.getMessage() + "; job paused";
-            pauseJob = true;
         } catch (SQLException | RuntimeException e) {
             outcome = RunState.FAILED;
             error = Errors.describe(e);
             log.error("job {} run {} failed", def.name(), runId, e);
         }
         RunStats stats = diff.stats();
-        Map<String, RunResult.SinkFailures> failures = diff.sinkFailures();
-        long deadLetters = failures.values().stream().mapToLong(RunResult.SinkFailures::deadLetters).sum();
         state.finishRun(runId, outcome, stats, error);
-        log.info("job {} run {}: {} (read {}, upserts {}, deletes {}, unchanged {}, dead letters {}){}", def.name(), runId, outcome,
-            stats.rowsRead(), stats.upserts(), stats.deletes(), stats.unchanged(), deadLetters, error == null ? "" : ": " + error);
+        // design 6: sinks too far behind are flagged for a resnapshot, which keeps the outbox bounded
+        List<String> lagging = new Outbox(state).flagLagging(def.name(), def.outbox().maxBatches());
+        lagging.forEach(s -> log.warn("job {} sink {} fell more than {} batches behind and needs a resnapshot", def.name(), s,
+            def.outbox().maxBatches()));
+        log.info("job {} run {}: {} (read {}, upserts {}, deletes {}, unchanged {}){}", def.name(), runId, outcome,
+            stats.rowsRead(), stats.upserts(), stats.deletes(), stats.unchanged(), error == null ? "" : ": " + error);
         MDC.remove("jobId");
         MDC.remove("runId");
-        return new RunResult(def.name(), runId, outcome, stats, error, pauseJob, failures);
+        return new RunResult(def.name(), runId, outcome, stats, error, lagging);
+    }
+
+    /**
+     * Delivers the sink's queued batches (design 6). With {@code waitForRetries} failures are retried in place, else a
+     * failure records when to try again and returns. Returns null when the job has no such sink.
+     */
+    public DeliveryResult deliver(String jobName, String sinkId, boolean waitForRetries) throws SQLException {
+        JobDef def = job(jobName);
+        Map<String, Object> cfg = sinkConfig(def, sinkId);
+        if (cfg == null) return null;
+        MDC.put("jobId", def.name());
+        try {
+            return new SinkDelivery(state, def.name(), sinkId, DeliveryPolicy.of(cfg), schema -> openSink(def, sinkId, cfg, schema))
+                .run(waitForRetries);
+        } finally {
+            MDC.remove("jobId");
+        }
+    }
+
+    /** Delivers every sink's queued batches, one sink after the other. */
+    public List<DeliveryResult> deliverAll(String jobName, boolean waitForRetries) throws SQLException {
+        List<DeliveryResult> results = new ArrayList<>();
+        for (Map<String, Object> cfg : job(jobName).sinks()) results.add(deliver(jobName, sinkId(cfg), waitForRetries));
+        return results;
     }
 
     /**
@@ -82,13 +106,27 @@ public final class JobRunner {
      */
     public void redeliver(String jobName, String sinkId, String payload) {
         JobDef def = job(jobName);
-        Map<String, Object> cfg = def.sinks().stream().filter(c -> sinkId(c).equals(sinkId)).findFirst()
-            .orElseThrow(() -> new IllegalArgumentException("the job no longer has the sink " + sinkId));
+        Map<String, Object> cfg = sinkConfig(def, sinkId);
+        if (cfg == null) throw new IllegalArgumentException("the job no longer has the sink " + sinkId);
         ChangeBatch batch = Batches.decode(payload);
+        try (Sink sink = openSink(def, sinkId, cfg, batch.schema())) {
+            SinkDelivery.apply(sink, batch);
+        }
+    }
+
+    private static Map<String, Object> sinkConfig(JobDef def, String sinkId) {
+        return def.sinks().stream().filter(c -> sinkId(c).equals(sinkId)).findFirst().orElse(null);
+    }
+
+    private Sink openSink(JobDef def, String sinkId, Map<String, Object> cfg, ObjectSchema schema) {
         Object conn = cfg.get("connection");
-        try (Sink sink = Connectors.openSink(String.valueOf(cfg.get("type")), conn == null ? null : connection(conn.toString()))) {
-            sink.init(new SinkContext(def.name(), sinkId, cfg), batch.schema());
-            sink.apply(batch);
+        Sink sink = Connectors.openSink(String.valueOf(cfg.get("type")), conn == null ? null : connection(conn.toString()));
+        try {
+            sink.init(new SinkContext(def.name(), sinkId, cfg), schema);
+            return sink;
+        } catch (RuntimeException e) {
+            sink.close();
+            throw e;
         }
     }
 
@@ -157,12 +195,10 @@ public final class JobRunner {
             boolean emptyToNull = empty == EmptyStrings.EMPTY_TO_NULL
                 || empty == EmptyStrings.AUTO && sinks.values().stream().anyMatch(s -> s.capabilities().emptyStringIsNull());
             ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys(), emptyToNull);
-            Map<String, DeliveryPolicy> policies = new LinkedHashMap<>();
             int i = 0;
             for (Map.Entry<String, Sink> sink : sinks.entrySet()) {
-                Map<String, Object> cfg = configs.get(i++);
-                policies.put(sink.getKey(), DeliveryPolicy.of(cfg));
-                sink.getValue().init(new SinkContext(def.name(), sink.getKey(), cfg), mapping.target());
+                // checks each sink against the target schema now (e.g. creates its table); delivery opens its own
+                sink.getValue().init(new SinkContext(def.name(), sink.getKey(), configs.get(i++)), mapping.target());
             }
             boolean keepRows = sinks.values().stream().anyMatch(s -> s.capabilities().needsDeletedRows());
             // the watermark column is read even when it is not synced, to move the cursor
@@ -170,7 +206,7 @@ public final class JobRunner {
                 : Stream.concat(mapping.sourceColumns().stream(), Stream.of(watermark.column())).toList();
             ReadSpec spec = new ReadSpec(schema.ref(), read, mapping.sourceKeys(),
                 def.fetchSize(), def.batchSize(), Duration.ofSeconds(def.queryTimeoutSeconds()));
-            return new Job(def.name(), source, spec, mapping, sinks, def.maxDeletePercent(), watermark, policies, keepRows);
+            return new Job(def.name(), source, spec, mapping, sinks, def.maxDeletePercent(), watermark, keepRows);
         } catch (RuntimeException e) {
             sinks.values().forEach(Sink::close);
             source.close();

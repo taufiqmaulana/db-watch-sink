@@ -36,7 +36,8 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
         Boolean fixedDelay,
         Integer jitterPercent,
         WatermarkDef watermark,
-        ReconcileDef reconcile) {
+        ReconcileDef reconcile,
+        OutboxDef outbox) {
 
         /**
          * Scheduling (design 5A): {@code schedule} is a 5-field cron expression; {@code every} is an interval such
@@ -49,6 +50,7 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
         public JobDef {
             watermark = Objects.requireNonNullElse(watermark, new WatermarkDef(null, null));
             reconcile = Objects.requireNonNullElse(reconcile, new ReconcileDef(null));
+            outbox = Objects.requireNonNullElse(outbox, new OutboxDef(null));
             schedule = schedule == null || schedule.isBlank() ? "*/5 * * * *" : schedule.trim();
             every = every == null || every.isBlank() ? null : every.trim();
             fixedDelay = Objects.requireNonNullElse(fixedDelay, false);
@@ -65,12 +67,12 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
 
         public JobDef withName(String newName) {
             return new JobDef(newName, source, keys, columns, mode, batchSize, fetchSize, maxDeletePercent, queryTimeoutSeconds, sinks,
-                schedule, every, fixedDelay, jitterPercent, watermark, reconcile);
+                schedule, every, fixedDelay, jitterPercent, watermark, reconcile, outbox);
         }
 
         public JobDef withSinks(List<Map<String, Object>> newSinks) {
             return new JobDef(name, source, keys, columns, mode, batchSize, fetchSize, maxDeletePercent, queryTimeoutSeconds, newSinks,
-                schedule, every, fixedDelay, jitterPercent, watermark, reconcile);
+                schedule, every, fixedDelay, jitterPercent, watermark, reconcile, outbox);
         }
 
         /** True for modes that read only rows changed since the last run (WATERMARK, HYBRID). */
@@ -94,6 +96,17 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
 
         public Duration overlapDuration() {
             return Durations.parse(overlap);
+        }
+    }
+
+    /**
+     * Design 6: how many batches a sink may fall behind before it is flagged RESNAPSHOT_REQUIRED and has to be loaded
+     * again, which bounds the outbox.
+     */
+    public record OutboxDef(Integer maxBatches) {
+
+        public OutboxDef {
+            maxBatches = Objects.requireNonNullElse(maxBatches, 1000);
         }
     }
 

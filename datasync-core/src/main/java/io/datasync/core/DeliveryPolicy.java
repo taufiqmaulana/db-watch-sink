@@ -16,7 +16,6 @@ record DeliveryPolicy(int maxAttempts, Duration initialBackoff, Duration maxBack
     enum OnDeadLetter { PAUSE, SKIP }
 
     /** Policy for one attempt and no retries, used where nothing is configured (tests). */
-    static final DeliveryPolicy ONCE = new DeliveryPolicy(1, Duration.ZERO, Duration.ZERO, OnDeadLetter.PAUSE);
 
     /** From a sink's config: {@code retry: { maxAttempts: 5, initialBackoff: 1s, maxBackoff: 1m }, onDeadLetter: PAUSE}. */
     static DeliveryPolicy of(Map<String, Object> sink) {

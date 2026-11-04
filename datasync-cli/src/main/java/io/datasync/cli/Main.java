@@ -1,5 +1,6 @@
 package io.datasync.cli;
 
+import io.datasync.core.DeliveryResult;
 import io.datasync.core.JobRunner;
 import io.datasync.core.RunKind;
 import io.datasync.core.RunResult;
@@ -16,9 +17,11 @@ import java.util.List;
 /**
  * {@code datasync run <config.yaml> [--job NAME] [--state FILE] [--reconcile] [--allow-deletes]}
  * <p>
- * Runs every job (or one) once. {@code --reconcile} makes WATERMARK and HYBRID jobs do a full snapshot diff,
- * which also applies deletes. Exit code: 0 all succeeded, 1 a run failed, 2 a run needs review (delete guard
- * tripped; re-run with {@code --allow-deletes}, and {@code --reconcile} for those jobs, once the deletes are confirmed).
+ * Runs every job (or one) once, then delivers its queued changes to every sink, retrying in place.
+ * {@code --reconcile} makes WATERMARK and HYBRID jobs do a full snapshot diff, which also applies deletes. Exit code:
+ * 0 all succeeded, 1 a run failed or a sink still has changes waiting (it is paused or needs a resnapshot; the next
+ * run delivers them once it is fixed), 2 a run needs review (delete guard tripped; re-run with {@code --allow-deletes},
+ * and {@code --reconcile} for those jobs, once the deletes are confirmed).
  */
 public final class Main {
 
@@ -66,6 +69,13 @@ public final class Main {
                     case NEEDS_REVIEW -> 2;
                     default -> 1;
                 });
+                for (DeliveryResult delivery : runner.deliverAll(name, true)) {
+                    if (!delivery.caughtUp()) {
+                        System.err.println("job " + name + " sink " + delivery.sinkId() + " is " + delivery.status() + " with "
+                            + delivery.backlog() + " batches waiting" + (delivery.error() == null ? "" : ": " + delivery.error()));
+                        exit = Math.max(exit, 1);
+                    }
+                }
             }
         }
         return exit;

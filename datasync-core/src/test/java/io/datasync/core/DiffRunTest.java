@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -67,10 +68,13 @@ class DiffRunTest {
 
     /** The single sink "memory:a" with this delivery policy, keeping rows when it asks for deleted ones. */
     private void usePolicy(String maxAttempts, String onDeadLetter) {
-        DeliveryPolicy policy = DeliveryPolicy.of(Map.of("retry", Map.of("maxAttempts", maxAttempts, "initialBackoff", "0s"),
-            "onDeadLetter", onDeadLetter));
+        policies.put("memory:a", policy(maxAttempts, onDeadLetter));
         job = new Job(job.id(), job.source(), job.readSpec(), job.mapping(), Map.of("memory:a", sink), job.maxDeletePercent(),
-            job.watermark(), Map.of("memory:a", policy), sink.wantsDeletedRows);
+            job.watermark(), sink.wantsDeletedRows);
+    }
+
+    private static DeliveryPolicy policy(String maxAttempts, String onDeadLetter) {
+        return DeliveryPolicy.of(Map.of("retry", Map.of("maxAttempts", maxAttempts, "initialBackoff", "0s"), "onDeadLetter", onDeadLetter));
     }
 
     private List<String> deadLetters() throws Exception {
@@ -233,7 +237,55 @@ class DiffRunTest {
         assertThat(run(false).upserts()).isEqualTo(5);
         assertThat(sink.target).hasSize(5);
         assertThat(deadLetters()).isEmpty();
-        assertThat(failures()).isEqualTo(new RunResult.SinkFailures(2, 0));
+        assertThat(delivered("memory:a")).extracting(DeliveryResult::failedAttempts, DeliveryResult::deadLetters).containsExactly(2L, 0L);
+        assertThat(outboxSize()).as("delivered batches are trimmed").isZero();
+    }
+
+    @Test
+    void aFailingSinkDoesNotHoldUpTheOthersAndCatchesUpLater() throws Exception {
+        FakeSink other = new FakeSink();
+        useSinks(Map.of("memory:a", sink, "memory:b", other));
+        policies.put("memory:a", policy("5", "PAUSE"));
+        sink.failing = true;
+
+        runWithoutWaiting();
+        assertThat(other.target).hasSize(5);
+        assertThat(sink.target).isEmpty();
+        DeliveryResult waiting = delivered("memory:a");
+        assertThat(waiting.backlog()).as("all 3 batches still queued").isEqualTo(3);
+        assertThat(waiting.retryAt()).isNotNull();
+        assertThat(waiting.error()).contains("sink down");
+        assertThat(state.indexSize("customers")).as("the run itself completed").isEqualTo(5);
+
+        sink.failing = false;
+        source.put(2L, "changed", "10.00");
+        runWithoutWaiting();
+        assertThat(sink.target).hasSize(5).extractingByKey(2L).satisfies(r -> assertThat(r).containsEntry("customer_name", "changed"));
+        assertThat(delivered("memory:a").caughtUp()).isTrue();
+    }
+
+    @Test
+    void aSinkTooFarBehindNeedsAResnapshotWhichLoadsItAgain() throws Exception {
+        FakeSink other = new FakeSink();
+        useSinks(Map.of("memory:a", sink, "memory:b", other));
+        policies.put("memory:a", policy("5", "PAUSE"));
+        sink.failing = true;
+        runWithoutWaiting();
+        Outbox outbox = new Outbox(state);
+        assertThat(outbox.flagLagging("customers", 2)).containsExactly("memory:a");
+        assertThat(outbox.sinkState("customers", "memory:a").status()).isEqualTo(Outbox.SinkStatus.RESNAPSHOT_REQUIRED);
+
+        sink.failing = false;
+        source.put(6L, "new", "1");
+        runWithoutWaiting();
+        assertThat(sink.target).as("nothing until resnapshotted").isEmpty();
+        assertThat(other.target).hasSize(6);
+
+        outbox.resnapshot("customers", "memory:a");
+        other.batches.clear();
+        runWithoutWaiting();
+        assertThat(sink.target).hasSize(6);
+        assertThat(other.batches).as("the other sink only gets changes").isEmpty();
     }
 
     @Test
@@ -251,16 +303,24 @@ class DiffRunTest {
         assertThat(replay.changes().getFirst().row()).containsEntry("customer_name", "c1");
         assertThat((BigDecimal) replay.changes().getFirst().row().get("BALANCE")).isEqualByComparingTo("10.00");
         assertThat(state.indexSize("customers")).as("skipped batches still count as seen").isEqualTo(5);
-        assertThat(failures()).isEqualTo(new RunResult.SinkFailures(1, 1));
+        assertThat(delivered("memory:a")).extracting(DeliveryResult::failedAttempts, DeliveryResult::deadLetters).containsExactly(1L, 1L);
     }
 
     @Test
-    void exhaustedRetriesWithPauseStopTheRun() throws Exception {
+    void exhaustedRetriesWithPausePauseTheSinkUntilResumed() throws Exception {
         usePolicy("2", "PAUSE");
-        sink.failures = 5;
-        assertThatThrownBy(() -> run(false)).isInstanceOf(DeadLetterPause.class).hasMessageContaining("503 Service Unavailable");
+        sink.failures = 2;
+        assertThat(run(false).upserts()).as("the run itself succeeds").isEqualTo(5);
         assertThat(deadLetters()).hasSize(1);
-        assertThat(state.indexSize("customers")).isZero();
+        assertThat(sink.target).isEmpty();
+        DeliveryResult paused = delivered("memory:a");
+        assertThat(paused.status()).isEqualTo(Outbox.SinkStatus.PAUSED);
+        assertThat(paused.error()).contains("503 Service Unavailable");
+        assertThat(paused.backlog()).isEqualTo(2);
+
+        new Outbox(state).resume("customers", "memory:a");
+        deliver(true);
+        assertThat(sink.target).as("the dead-lettered first batch stays in the dead letters").containsOnlyKeys(3L, 4L, 5L);
     }
 
     @Test
@@ -274,35 +334,52 @@ class DiffRunTest {
         source.rows.remove(4L);
         run(false);
         assertThat(sink.deleted).singleElement()
-            .satisfies(d -> assertThat(d.row()).containsEntry("ID", 4).containsEntry("customer_name", "c4"));
-    }
-
-    @Test
-    void failedDeliveryLeavesTheIndexUntouchedSoTheChunkIsResent() throws Exception {
-        sink.failing = true;
-        assertThatThrownBy(() -> run(false)).hasMessageContaining("sink down");
-        assertThat(state.indexSize("customers")).isZero();
-
-        sink.failing = false;
-        assertThat(run(false).upserts()).isEqualTo(5);
+            .satisfies(d -> assertThat(d.row()).containsEntry("ID", 4L).containsEntry("customer_name", "c4"));
     }
 
     private RunStats run(boolean allowDeletes) throws Exception {
         return run(RunKind.POLL, allowDeletes);
     }
 
+    /** A run, then delivery to every sink retrying in place, as the CLI does. */
     private RunStats run(RunKind kind, boolean allowDeletes) throws Exception {
-        lastRun = new DiffRun(state, state.startRun("customers", kind.name()));
-        lastRun.run(job, kind, allowDeletes);
-        return lastRun.stats();
+        DiffRun diff = new DiffRun(state, state.startRun("customers", kind.name()));
+        try {
+            diff.run(job, kind, allowDeletes);
+        } finally {
+            deliver(true);
+        }
+        return diff.stats();
     }
 
-    /** The one sink's failures in the last run. */
-    private RunResult.SinkFailures failures() {
-        return lastRun.sinkFailures().values().stream().findFirst().orElse(new RunResult.SinkFailures(0, 0));
+    /** A run, then one delivery pass that records failures for later, as the server does. */
+    private void runWithoutWaiting() throws Exception {
+        new DiffRun(state, state.startRun("customers", "POLL")).run(job, RunKind.POLL, false);
+        deliver(false);
     }
 
-    private DiffRun lastRun;
+    private void deliver(boolean waitForRetries) throws Exception {
+        for (Map.Entry<String, Sink> s : job.sinks().entrySet()) {
+            DeliveryPolicy policy = policies.getOrDefault(s.getKey(), policy("1", "PAUSE"));
+            deliveries.put(s.getKey(), new SinkDelivery(state, job.id(), s.getKey(), policy, schema -> s.getValue()).run(waitForRetries));
+        }
+    }
+
+    private long outboxSize() throws Exception {
+        return state.transact(c -> {
+            try (var rs = c.createStatement().executeQuery("SELECT count(*) FROM outbox_batch")) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        });
+    }
+
+    private DeliveryResult delivered(String sinkId) {
+        return deliveries.get(sinkId);
+    }
+
+    private final Map<String, DeliveryPolicy> policies = new HashMap<>();
+    private final Map<String, DeliveryResult> deliveries = new HashMap<>();
 
     static final class FakeSource implements SourceConnector {
         final Map<Long, Map<String, Object>> rows = new LinkedHashMap<>();

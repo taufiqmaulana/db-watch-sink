@@ -5,28 +5,26 @@ import io.datasync.api.ChangeBatch;
 import io.datasync.api.Column;
 import io.datasync.api.ReadSpec;
 import io.datasync.api.RecordCursor;
-import io.datasync.api.Sink;
-import io.datasync.api.SinkException;
 import io.datasync.api.WatermarkSpec;
+import io.datasync.core.Outbox.SinkStatus;
 import io.datasync.core.StateStore.IndexEntry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * One run: rows read from the source are diffed against the hash index, applied to every sink, and only then
- * recorded in the index (the single-pass MVP variant, design 6). A crash in between re-sends the chunk on the
- * next run, which idempotent sinks absorb.
+ * One run's read side (design 6): rows read from the source are diffed against the hash index, and each chunk's
+ * changes are written to the job's outbox in the same transaction that records them in the index. Sinks then
+ * deliver from the outbox on their own (see {@link SinkDelivery}), so a slow or failing sink holds up no other.
  * <p>
  * A full scan (design 5.2: SNAPSHOT_DIFF, or a RECONCILE) also turns keys missing from the source into deletes,
  * behind the delete guard. A watermark read (design 5.1: a POLL of a WATERMARK or HYBRID job) reads only rows at
@@ -34,22 +32,23 @@ import java.util.stream.Stream;
  * delivered. Without a cursor yet, it reads everything in key order instead.
  * <p>
  * The index is per job, so it only says what changed since the last run. A sink without a completed full load
- * (just added, or pointed at a new target) therefore gets every row of a full read; a watermark job with such a
- * sink does a full read.
+ * (just added, pointed at a new target, or resnapshotted) therefore gets every row of a full read; a watermark job
+ * with such a sink does a full read. Sinks flagged RESNAPSHOT_REQUIRED get nothing until they are resnapshotted.
  */
 final class DiffRun {
 
     private final StateStore state;
+    private final Outbox outbox;
     private final String runId;
-    private Set<String> loadedSinks;
+    /** The sinks this run writes for, and those of them already fully loaded. */
+    private Set<String> sinks, loadedSinks;
     private Object highestWatermark;
-    private static final Logger log = LoggerFactory.getLogger(DiffRun.class);
 
-    private final Map<String, long[]> failures = new LinkedHashMap<>();   // sink id -> {attempts, dead letters}
-    private long rowsRead, upserts, deletes, unchanged, seq, batchId;
+    private long rowsRead, upserts, deletes, unchanged, seq;
 
     DiffRun(StateStore state, String runId) {
         this.state = state;
+        this.outbox = new Outbox(state);
         this.runId = runId;
     }
 
@@ -57,20 +56,16 @@ final class DiffRun {
         return new RunStats(rowsRead, upserts, deletes, unchanged);
     }
 
-    /** Sinks that failed at least once in this run, so far. */
-    Map<String, RunResult.SinkFailures> sinkFailures() {
-        Map<String, RunResult.SinkFailures> out = new LinkedHashMap<>();
-        failures.forEach((sink, f) -> out.put(sink, new RunResult.SinkFailures(f[0], f[1])));
-        return out;
-    }
-
     void run(Job job, RunKind kind, boolean allowDeletes) throws SQLException {
         long indexed = state.indexSize(job.id());
-        loadedSinks = state.loadedSinks(job.id(), job.sinks().keySet());
+        sinks = outbox.prepare(job.id(), job.sinks().keySet()).values().stream()
+            .filter(s -> s.status() != SinkStatus.RESNAPSHOT_REQUIRED).map(Outbox.SinkState::sinkId)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        loadedSinks = state.loadedSinks(job.id(), sinks);
         Watermark watermark = job.watermark();
         boolean fullScan = watermark == null || kind == RunKind.RECONCILE;
         ReadSpec spec = job.readSpec();
-        if (!fullScan && loadedSinks.containsAll(job.sinks().keySet())) {
+        if (!fullScan && loadedSinks.containsAll(sinks)) {
             Optional<String> cursor = state.cursor(job.id(), watermark.column());
             if (cursor.isPresent()) spec = watermarkRead(job, watermark.from(cursor.get()));
         }
@@ -87,9 +82,9 @@ final class DiffRun {
             }
             if (!chunk.isEmpty()) diff(job, chunk);
         }
-        // every sink now holds every source row read; deletes below are sent to all of them
-        state.markLoaded(job.id(), job.sinks().keySet());
-        loadedSinks = job.sinks().keySet();
+        // every sink now has every source row read queued; deletes below are sent to all of them
+        state.markLoaded(job.id(), sinks);
+        loadedSinks = sinks;
 
         if (fullScan) applyDeletes(job, indexed, allowDeletes);
         if (watermark != null && highestWatermark != null) {
@@ -116,8 +111,12 @@ final class DiffRun {
                     e.rowJson() == null ? null : Canonical.parse(e.rowJson()), null,
                     idempotencyKey(job, e.keyJson(), "del"), now, ++seq))
                 .toList();
-            deliver(job, removed, removed);
-            state.remove(job.id(), entries);
+            List<IndexEntry> removedEntries = entries;
+            state.transact(c -> {
+                enqueue(job, removed, removed);
+                state.remove(job.id(), removedEntries);
+                return null;
+            });
             deletes += entries.size();
         }
     }
@@ -141,7 +140,7 @@ final class DiffRun {
         }
 
         Map<String, String> known = state.rowHashes(job.id(), entries.stream().map(IndexEntry::keyHash).toList());
-        boolean fullLoad = !loadedSinks.containsAll(job.sinks().keySet());
+        boolean fullLoad = !loadedSinks.containsAll(sinks);
         Instant now = Instant.now();
         List<Change> changed = new ArrayList<>();
         List<Change> all = new ArrayList<>(fullLoad ? rows.size() : 0);
@@ -154,8 +153,11 @@ final class DiffRun {
             if (isChanged) changed.add(change);
             if (fullLoad) all.add(change);
         }
-        deliver(job, changed, all);
-        state.markSeen(job.id(), runId, entries);
+        state.transact(c -> {
+            enqueue(job, changed, all);
+            state.markSeen(job.id(), runId, entries);
+            return null;
+        });
 
         rowsRead += rows.size();
         upserts += changed.size();
@@ -176,64 +178,18 @@ final class DiffRun {
         }
     }
 
-    /** {@code changed} goes to fully loaded sinks, {@code all} to sinks still waiting for their full load. */
-    private void deliver(Job job, List<Change> changed, List<Change> all) throws SQLException {
-        if (changed.isEmpty() && all.isEmpty()) return;
-        batchId++;
-        for (Map.Entry<String, Sink> sink : job.sinks().entrySet()) {
-            List<Change> batch = loadedSinks.contains(sink.getKey()) ? changed : all;
-            if (!batch.isEmpty()) send(job, sink.getKey(), sink.getValue(), batch);
-        }
+    /** Queues {@code changed} for fully loaded sinks and {@code all} for sinks still waiting for their full load. */
+    private void enqueue(Job job, List<Change> changed, List<Change> all) throws SQLException {
+        List<String> loaded = sinks.stream().filter(loadedSinks::contains).toList();
+        List<String> loading = sinks.stream().filter(s -> !loadedSinks.contains(s)).toList();
+        append(job, loaded, changed);
+        append(job, loading, all);
     }
 
-    /**
-     * Applies changes to one sink in pieces of its batch limit. A failed piece is retried with backoff per the
-     * sink's policy, then moved to the dead letters (design 6); with onDeadLetter: PAUSE that stops the run.
-     */
-    private void send(Job job, String sinkId, Sink sink, List<Change> changes) throws SQLException {
-        int limit = sink.capabilities().batchLimit();
-        int size = limit > 0 ? limit : changes.size();
-        DeliveryPolicy policy = job.policy(sinkId);
-        for (int from = 0; from < changes.size(); from += size) {
-            ChangeBatch batch = new ChangeBatch(job.id(), sinkId, batchId, job.mapping().target(),
-                changes.subList(from, Math.min(from + size, changes.size())));
-            for (int attempt = 1; ; attempt++) {
-                try {
-                    sink.apply(batch);
-                    break;
-                } catch (RuntimeException e) {
-                    failures.computeIfAbsent(sinkId, k -> new long[2])[0]++;
-                    SinkException failure = e instanceof SinkException se ? se : null;
-                    if ((failure == null || failure.retryable()) && attempt < policy.maxAttempts()) {
-                        pause(policy.backoff(attempt, failure == null ? null : failure.retryAfter()));
-                        continue;
-                    }
-                    deadLetter(batch, e, attempt, policy);
-                    break;
-                }
-            }
-        }
-    }
-
-    private void deadLetter(ChangeBatch batch, RuntimeException error, int attempts, DeliveryPolicy policy) throws SQLException {
-        String message = Errors.describe(error);
-        String id = state.addDeadLetter(batch.jobId(), batch.sinkId(), batch.batchId(), batch.changes().size(), Batches.encode(batch),
-            message, attempts);
-        failures.computeIfAbsent(batch.sinkId(), k -> new long[2])[1]++;
-        log.warn("job {} sink {}: {} changes moved to dead letter {} after {} attempts: {}", batch.jobId(), batch.sinkId(),
-            batch.changes().size(), id, attempts, message);
-        if (policy.onDeadLetter() == DeliveryPolicy.OnDeadLetter.PAUSE) {
-            throw new DeadLetterPause("sink " + batch.sinkId() + " could not take a batch, moved to the dead letters: " + message, error);
-        }
-    }
-
-    private static void pause(Duration wait) {
-        try {
-            Thread.sleep(wait);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("interrupted while waiting to retry", e);
-        }
+    private void append(Job job, Collection<String> recipients, List<Change> changes) throws SQLException {
+        if (recipients.isEmpty() || changes.isEmpty()) return;
+        outbox.append(job.id(), recipients, changes.size(),
+            id -> Batches.encode(new ChangeBatch(job.id(), null, id, job.mapping().target(), changes)));
     }
 
     private static String idempotencyKey(Job job, String keyJson, String rowHashOrDel) {
