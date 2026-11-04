@@ -15,6 +15,7 @@
     <module>datasync-jdbc</module>
     <module>datasync-dialect-oracle</module>
     <module>datasync-dialect-postgres</module>
+    <module>datasync-sink-webhook</module>
     <module>datasync-cli</module>
     <module>datasync-ui</module>
     <module>datasync-server</module>
@@ -50,6 +51,11 @@
       <dependency>
         <groupId>io.datasync</groupId>
         <artifactId>datasync-dialect-postgres</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.datasync</groupId>
+        <artifactId>datasync-sink-webhook</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
