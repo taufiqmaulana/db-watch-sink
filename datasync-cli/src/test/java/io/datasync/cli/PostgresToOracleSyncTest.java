@@ -8,6 +8,7 @@ import org.testcontainers.oracle.OracleContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.nio.file.Files;
+import java.time.Duration;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -25,7 +26,8 @@ class PostgresToOracleSyncTest {
     static final PostgreSQLContainer PG = new PostgreSQLContainer("postgres:17");
 
     @Container
-    static final OracleContainer ORA = new OracleContainer("gvenzl/oracle-free:23-slim-faststart");
+    // Oracle can take minutes to start on a busy or freshly started Docker host
+    static final OracleContainer ORA = new OracleContainer("gvenzl/oracle-free:23-slim-faststart").withStartupTimeout(Duration.ofMinutes(5));
 
     @TempDir
     Path dir;
