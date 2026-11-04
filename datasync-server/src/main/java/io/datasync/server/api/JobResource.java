@@ -1,6 +1,8 @@
 package io.datasync.server.api;
 
 import io.datasync.core.JobRunner;
+import io.datasync.core.Outbox;
+import io.datasync.core.Outbox.SinkStatus;
 import io.datasync.core.Preview;
 import io.datasync.core.RunKind;
 import io.datasync.core.config.DataSyncConfig.JobDef;
@@ -13,6 +15,7 @@ import io.datasync.server.Json;
 import io.datasync.server.Runs;
 import io.datasync.server.Runs.RunView;
 import io.datasync.server.Scheduler;
+import io.datasync.server.SinkWorkers;
 import io.datasync.server.api.ConnectionResource.ConnectionRole;
 import io.datasync.server.auth.Requires;
 import io.datasync.server.auth.Role;
@@ -47,11 +50,20 @@ public class JobResource {
      * {@code nextRunAt} and {@code nextReconcileAt} (HYBRID only) are set only while the job is ACTIVE.
      * {@code watermarkValue} is the highest watermark delivered so far, for WATERMARK and HYBRID jobs.
      * {@code periodSeconds} is the time between scheduled runs, for warning when runs take longer than half of it.
+     * {@code sinks} is each sink's delivery state, in config order.
      */
     public record JobView(String id, String name, Status status, int version, boolean running, @Schema(nullable = true) RunView lastRun,
                           @Schema(nullable = true) Instant nextRunAt, @Schema(nullable = true) Instant nextReconcileAt,
-                          @Schema(nullable = true) String watermarkValue, long periodSeconds, JobDef config, Instant createdAt,
-                          Instant updatedAt) {}
+                          @Schema(nullable = true) String watermarkValue, long periodSeconds, JobDef config, List<SinkView> sinks,
+                          Instant createdAt, Instant updatedAt) {}
+
+    /**
+     * A sink's delivery from the job outbox (design 6). {@code backlog}: batches waiting for it. {@code attempts}: failed
+     * attempts at the next one, retried at {@code nextRetryAt}. {@code loaded}: it has had its full load (or has it queued).
+     */
+    public record SinkView(String id, String label, SinkStatus status, long backlog, int attempts, @Schema(nullable = true) Instant nextRetryAt,
+                           @Schema(nullable = true) String lastError, @Schema(nullable = true) Instant deliveredAt, boolean delivering,
+                           boolean loaded) {}
 
     /** {@code version} is required on update and must match the stored one (optimistic locking). */
     public record JobInput(JobDef config, Integer version) {}
@@ -71,6 +83,9 @@ public class JobResource {
 
     @Inject
     Scheduler scheduler;
+
+    @Inject
+    SinkWorkers workers;
 
     @Inject
     Runs runs;
@@ -130,6 +145,8 @@ public class JobResource {
             Db.update(c, "DELETE FROM row_index WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM sink_load WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM job_cursor WHERE job_id = ?", id);
+            Db.update(c, "DELETE FROM outbox_batch WHERE job_id = ?", id);
+            Db.update(c, "DELETE FROM sink_offset WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM run WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM dead_letter WHERE job_id = ?", id);
             return Db.update(c, "DELETE FROM job WHERE id = ?", id);
@@ -168,6 +185,71 @@ public class JobResource {
     @Requires(Role.OPERATOR)
     public RestResponse<JobView> reconcile(String id, @RestQuery boolean allowDeletes) {
         return start(id, RunKind.RECONCILE, allowDeletes);
+    }
+
+    /** Continues delivery to a sink paused after a dead letter, from the batch after it. */
+    @POST
+    @Path("/{id}/resume-sink")
+    @Requires(Role.OPERATOR)
+    public JobView resumeSink(String id, @RestQuery String sink) {
+        SinkView view = sink(id, sink);
+        if (view.status() != SinkStatus.PAUSED) throw ApiErrors.conflict("This sink is not paused");
+        outbox(o -> o.resume(id, sink));
+        audit.record("sink.resume", "job:" + id, Map.of("sink", view.label()));
+        workers.kick(id);
+        events.publish(new Events.Event("job-changed", id, null, null));
+        return get(id);
+    }
+
+    /**
+     * Drops the sink's backlog and starts a run that sends it every row (design 6), e.g. after it fell too far behind or
+     * its target was emptied. Other sinks only get the run's changes.
+     */
+    @POST
+    @Path("/{id}/resnapshot")
+    @Requires(Role.OPERATOR)
+    public RestResponse<JobView> resnapshot(String id, @RestQuery String sink) {
+        SinkView view = sink(id, sink);
+        if (runs.isRunning(id)) throw ApiErrors.conflict("Wait for the current run to finish");
+        outbox(o -> o.resnapshot(id, sink));
+        audit.record("sink.resnapshot", "job:" + id, Map.of("sink", view.label()));
+        runs.start(id, RunKind.POLL, false);
+        return RestResponse.status(RestResponse.Status.ACCEPTED, get(id));
+    }
+
+    private SinkView sink(String jobId, String sinkId) {
+        return get(jobId).sinks().stream().filter(s -> s.id().equals(sinkId)).findFirst()
+            .orElseThrow(() -> new NotFoundException("This job has no such sink"));
+    }
+
+    private interface OutboxAction {
+        void apply(Outbox outbox) throws SQLException;
+    }
+
+    private void outbox(OutboxAction action) {
+        try {
+            action.apply(new Outbox(db.store()));
+        } catch (SQLException e) {
+            throw new IllegalStateException("state store error", e);
+        }
+    }
+
+    /** Each configured sink's delivery state; a sink that has not been through a run yet shows as active and empty. */
+    private List<SinkView> sinkViews(String jobId, JobDef config) {
+        record Offset(String status, long backlog, int attempts, Instant retry, String error, Instant delivered) {}
+        Map<String, Offset> offsets = db.query("SELECT o.sink_id, o.status, o.attempts, o.next_retry_at, o.last_error, o.delivered_at,"
+                + " (SELECT count(*) FROM outbox_batch b WHERE b.job_id = o.job_id AND b.batch_id > o.last_acked_batch"
+                + " AND instr(b.recipients, '|' || o.sink_id || '|') > 0) AS backlog FROM sink_offset o WHERE o.job_id = ?",
+            rs -> Map.entry(rs.getString("sink_id"), new Offset(rs.getString("status"), rs.getLong("backlog"), rs.getInt("attempts"),
+                Db.instant(rs, "next_retry_at"), rs.getString("last_error"), Db.instant(rs, "delivered_at"))), jobId)
+            .stream().collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        Set<String> loaded = Set.copyOf(db.query("SELECT sink_id FROM sink_load WHERE job_id = ?", rs -> rs.getString(1), jobId));
+        return config.sinks().stream().map(cfg -> {
+            String sinkId = JobRunner.sinkId(cfg);
+            Offset o = offsets.getOrDefault(sinkId, new Offset("ACTIVE", 0, 0, null, null, null));
+            return new SinkView(sinkId, configs.sinkLabel(sinkId), SinkStatus.valueOf(o.status()), o.backlog(), o.attempts(), o.retry(),
+                o.error(), o.delivered(), workers.isDelivering(jobId, sinkId), loaded.contains(sinkId));
+        }).toList();
     }
 
     private RestResponse<JobView> start(String id, RunKind kind, boolean allowDeletes) {
@@ -310,6 +392,7 @@ public class JobResource {
         return new JobView(id, rs.getString("name"), status, rs.getInt("version"), runs.isRunning(id), latest.get(id),
             active ? scheduler.next(id, RunKind.POLL).orElse(null) : null,
             active ? scheduler.next(id, RunKind.RECONCILE).orElse(null) : null,
-            watermark, JobSchedule.of(config).period().toSeconds(), config, Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
+            watermark, JobSchedule.of(config).period().toSeconds(), config, sinkViews(id, config), Db.instant(rs, "created_at"),
+            Db.instant(rs, "updated_at"));
     }
 }

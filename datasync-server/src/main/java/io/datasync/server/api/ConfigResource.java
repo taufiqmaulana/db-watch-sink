@@ -216,7 +216,7 @@ public class ConfigResource {
         SourceDef source = def.source() == null || def.source().connection() == null ? def.source()
             : new SourceDef(map.apply(def.source().connection()), def.source().object());
         return new JobDef(def.name(), source, def.keys(), def.columns(), def.mode(), def.batchSize(), def.fetchSize(), def.maxDeletePercent(),
-            def.queryTimeoutSeconds(), sinks, def.schedule(), def.every(), def.fixedDelay(), def.jitterPercent(), def.watermark(), def.reconcile());
+            def.queryTimeoutSeconds(), sinks, def.schedule(), def.every(), def.fixedDelay(), def.jitterPercent(), def.watermark(), def.reconcile(), def.outbox());
     }
 
     /** ORACLE_PROD for "oracle-prod". */

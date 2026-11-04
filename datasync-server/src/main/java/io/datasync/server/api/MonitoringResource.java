@@ -27,10 +27,11 @@ public class MonitoringResource {
 
     /**
      * Counts for the dashboard tiles; the 24 h figures cover runs started in the last 24 hours.
-     * {@code openDeadLetters} counts batches waiting to be retried or discarded.
+     * {@code openDeadLetters} counts batches waiting to be retried or discarded; {@code stoppedSinks} sinks paused after a
+     * dead letter or needing a resnapshot.
      */
     public record Overview(int jobs, int active, int paused, int needsReview, int failing, int running,
-                           int runs24h, int failedRuns24h, long rowsChanged24h, int openDeadLetters) {}
+                           int runs24h, int failedRuns24h, long rowsChanged24h, int openDeadLetters, int stoppedSinks) {}
 
     @Inject
     Db db;
@@ -60,7 +61,8 @@ public class MonitoringResource {
             recent.size(),
             (int) recent.stream().filter(r -> r.state() == RunState.FAILED).count(),
             recent.stream().mapToLong(r -> r.upserts() + r.deletes()).sum(),
-            db.one("SELECT count(*) FROM dead_letter WHERE resolved_at IS NULL", rs -> rs.getInt(1)).orElse(0));
+            db.one("SELECT count(*) FROM dead_letter WHERE resolved_at IS NULL", rs -> rs.getInt(1)).orElse(0),
+            db.one("SELECT count(*) FROM sink_offset WHERE status <> 'ACTIVE'", rs -> rs.getInt(1)).orElse(0));
     }
 
     @GET

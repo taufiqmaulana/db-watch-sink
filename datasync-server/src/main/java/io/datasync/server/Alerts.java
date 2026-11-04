@@ -1,6 +1,8 @@
 package io.datasync.server;
 
+import io.datasync.core.DeliveryResult;
 import io.datasync.core.Errors;
+import io.datasync.core.Outbox.SinkStatus;
 import io.datasync.core.RunResult;
 import io.datasync.core.RunState;
 import io.datasync.server.Housekeeping.Freshness;
@@ -25,14 +27,14 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Built-in alert rules (design 12): a job failed N runs in a row, an active job lags, a batch was dead-lettered, the delete
- * guard stopped a run. Alerts go to the configured email recipients (SMTP from the QUARKUS_MAILER_* settings) and webhook,
+ * Built-in alert rules (design 12): a job failed N runs in a row, an active job lags, a sink dead-lettered a batch or fell
+ * too far behind (design 6), the delete guard stopped a run. Alerts go to the configured email recipients (SMTP from the QUARKUS_MAILER_* settings) and webhook,
  * and are recorded in the audit log. A failing channel is logged, never thrown.
  */
 @Singleton
 public class Alerts {
 
-    public enum Event { JOB_FAILED, JOB_LAGGING, DEAD_LETTER, DELETE_GUARD, TEST }
+    public enum Event { JOB_FAILED, JOB_LAGGING, DEAD_LETTER, SINK_BEHIND, DELETE_GUARD, TEST }
 
     /** {@code failures} maps a channel to why it could not deliver. */
     public record Delivery(List<String> sent, Map<String, String> failures) {}
@@ -49,6 +51,9 @@ public class Alerts {
     @Inject
     Audit audit;
 
+    @Inject
+    JobConfigs configs;
+
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final Set<String> lagging = ConcurrentHashMap.newKeySet();
 
@@ -59,15 +64,24 @@ public class Alerts {
             send(rules, Event.DELETE_GUARD, jobId, "Job " + jobName + " stopped before deleting: " + result.error()
                 + ". Check the source, then apply the deletes on the job page if they are real.");
         }
-        long deadLetters = result.deadLetters();
-        if (deadLetters > 0 && rules.deadLetters()) {
-            send(rules, Event.DEAD_LETTER, jobId, "Job " + jobName + " moved " + deadLetters + " batch" + (deadLetters == 1 ? "" : "es")
-                + " to the dead letters" + (result.pauseJob() ? " and was paused: " + result.error() : "") + ".");
+        if (!result.laggingSinks().isEmpty() && rules.deadLetters()) {
+            send(rules, Event.SINK_BEHIND, jobId, "Job " + jobName + ": " + result.laggingSinks().stream().map(configs::sinkLabel).toList()
+                + " fell too far behind and need a resnapshot to be loaded again.");
         }
         if (result.state() == RunState.FAILED && rules.failedRuns() > 0 && justReached(jobId, rules.failedRuns())) {
             send(rules, Event.JOB_FAILED, jobId, "Job " + jobName + " failed " + rules.failedRuns() + " run" + (rules.failedRuns() == 1 ? "" : "s")
                 + " in a row. Last error: " + result.error());
         }
+    }
+
+    /** Checks the dead-letter rule after a sink's delivery pass. */
+    public void afterDelivery(String jobId, String jobName, DeliveryResult result) {
+        AlertSettings rules = settings.get().alerts();
+        long n = result.deadLetters();
+        if (n == 0 || !rules.deadLetters()) return;
+        send(rules, Event.DEAD_LETTER, jobId, "Job " + jobName + ", sink " + configs.sinkLabel(result.sinkId()) + ": moved " + n + " batch"
+            + (n == 1 ? "" : "es") + " to the dead letters" + (result.status() == SinkStatus.PAUSED ? " and paused the sink" : "") + ". "
+            + result.error());
     }
 
     /** Alerts once when an active job goes longer than the threshold without a successful run, again only after it recovers. */
@@ -139,6 +153,7 @@ public class Alerts {
             case JOB_FAILED -> "Job failing";
             case JOB_LAGGING -> "Job lagging";
             case DEAD_LETTER -> "Batches dead-lettered";
+            case SINK_BEHIND -> "Sink needs a resnapshot";
             case DELETE_GUARD -> "Delete guard tripped";
             case TEST -> "Test alert";
         };

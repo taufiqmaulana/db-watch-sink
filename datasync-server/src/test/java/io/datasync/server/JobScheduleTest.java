@@ -53,10 +53,10 @@ class JobScheduleTest {
 
     private static JobDef hybrid(String reconcileCron) {
         return new JobDef("j", null, null, null, Mode.HYBRID, null, null, null, null, null, null, null, null, null,
-            new WatermarkDef("UPDATED_AT", null), new ReconcileDef(reconcileCron));
+            new WatermarkDef("UPDATED_AT", null), new ReconcileDef(reconcileCron), null);
     }
 
     private static JobDef job(String cron, String every) {
-        return new JobDef("j", null, null, null, null, null, null, null, null, null, cron, every, null, null, null, null);
+        return new JobDef("j", null, null, null, null, null, null, null, null, null, cron, every, null, null, null, null, null);
     }
 }

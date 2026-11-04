@@ -200,7 +200,10 @@ class ApiTest {
         }
     }
 
-    /** Design 6: a webhook that is down dead-letters the batch and pauses the job; a retry delivers it later. */
+    /**
+     * Design 6: the run queues its changes in the outbox and succeeds; the webhook sink, down, dead-letters the batch and
+     * pauses. A retry delivers the dead letter, and once resumed the sink gets new changes again.
+     */
     private static void deadLettersAreRetriedOnceTheWebhookIsBack(String admin, String dbConnId) throws Exception {
         int port;
         try (ServerSocket free = new ServerSocket(0)) {
@@ -222,7 +225,11 @@ class ApiTest {
         String jobId = as(admin).body(Map.of("config", config)).post("/jobs").then().statusCode(201).extract().path("id");
         as(admin).post("/jobs/" + jobId + "/run").then().statusCode(202);
         awaitRunFinished(admin, jobId);
-        as(admin).get("/jobs/" + jobId).then().body("status", equalTo("PAUSED")).body("lastRun.state", equalTo("FAILED"));
+        awaitSink(admin, jobId, "PAUSED");
+        String sinkId = as(admin).get("/jobs/" + jobId).then().body("status", equalTo("ACTIVE")).body("lastRun.state", equalTo("SUCCEEDED"))
+            .body("sinks[0].label", equalTo("hook")).body("sinks[0].lastError", containsString("dead letters"))
+            .extract().path("sinks[0].id");
+        as(admin).get("/overview").then().body("stoppedSinks", equalTo(1));
         String deadLetterId = as(admin).queryParam("jobId", jobId).get("/dead-letters").then().statusCode(200)
             .body("size()", equalTo(1)).body("[0].changeCount", equalTo(2)).body("[0].jobName", equalTo("items_hook"))
             .extract().path("[0].id");
@@ -244,17 +251,39 @@ class ApiTest {
             assertThat(received).singleElement().asString().contains("\"job\":\"items_hook\"").contains("\"op\":\"upsert\"");
             as(admin).queryParam("jobId", jobId).get("/dead-letters").then().body("size()", equalTo(0));
             as(admin).queryParam("status", "RESOLVED").get("/dead-letters").then().body("[0].resolution", equalTo("RETRIED"));
-            as(admin).get("/audit").then().body("action", hasItem("dead-letter.retry")).body("action", hasItem("job.pause"));
+            as(admin).queryParam("sink", sinkId).post("/jobs/" + jobId + "/resume-sink").then().statusCode(200)
+                .body("sinks[0].status", equalTo("ACTIVE"));
+            as(admin).get("/audit").then().body("action", hasItem("dead-letter.retry")).body("action", hasItem("sink.resume"));
 
-            as(admin).post("/jobs/" + jobId + "/resume").then().statusCode(200);
+            sql("INSERT INTO items VALUES (3, 'c')");
             as(admin).post("/jobs/" + jobId + "/run").then().statusCode(202);
             awaitRunFinished(admin, jobId);
-            as(admin).get("/jobs/" + jobId).then().body("lastRun.state", equalTo("SUCCEEDED"));
+            Instant deadline = Instant.now().plus(Duration.ofSeconds(15));
+            while (received.size() < 2 && Instant.now().isBefore(deadline)) Thread.sleep(200);
+            assertThat(received).hasSize(2).last().asString().contains("\"id\":3");
+            as(admin).get("/jobs/" + jobId).then().body("sinks[0].backlog", equalTo(0)).body("sinks[0].deliveredAt", notNullValue());
+
+            // a resnapshot sends that sink every row again
+            as(admin).queryParam("sink", sinkId).post("/jobs/" + jobId + "/resnapshot").then().statusCode(202);
+            awaitRunFinished(admin, jobId);
+            deadline = Instant.now().plus(Duration.ofSeconds(15));
+            while (received.size() < 3 && Instant.now().isBefore(deadline)) Thread.sleep(200);
+            assertThat(received).hasSize(3).last().asString().contains("\"id\":1").contains("\"id\":2").contains("\"id\":3");
+            as(admin).get("/audit").then().body("action", hasItem("sink.resnapshot"));
             as(admin).delete("/jobs/" + jobId).then().statusCode(204);
             as(admin).queryParam("status", "ALL").queryParam("jobId", jobId).get("/dead-letters").then().body("size()", equalTo(0));
         } finally {
             hook.stop(0);
         }
+    }
+
+    private static void awaitSink(String session, String jobId, String status) throws InterruptedException {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(15));
+        while (Instant.now().isBefore(deadline)) {
+            if (status.equals(as(session).get("/jobs/" + jobId).then().extract().path("sinks[0].status"))) return;
+            Thread.sleep(200);
+        }
+        throw new AssertionError("sink did not become " + status);
     }
 
     private static String login(String username, String password, boolean mustChange) {

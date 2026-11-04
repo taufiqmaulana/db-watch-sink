@@ -60,6 +60,9 @@ public class Runs {
     @Inject
     Housekeeping housekeeping;
 
+    @Inject
+    SinkWorkers workers;
+
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Set<String> running = ConcurrentHashMap.newKeySet();
     private final Map<String, Semaphore> connectionSlots = new ConcurrentHashMap<>();
@@ -92,12 +95,9 @@ public class Runs {
                 RunResult result = new JobRunner(config, db.store()).run(jobId, kind, allowDeletes);
                 runId = result.runId();
                 state = result.state();
-                if (result.pauseJob()) {
-                    // design 6: onDeadLetter PAUSE stops the job until an operator resumes it
-                    db.update("UPDATE job SET status = 'PAUSED', updated_at = ? WHERE id = ?", Instant.now(), jobId);
-                    audit.record("system", "job.pause", "job:" + jobId, Map.of("reason", result.error()));
-                    events.publish(new Events.Event("job-changed", jobId, runId, null));
-                } else if (state == RunState.NEEDS_REVIEW) {
+                // design 6: the run queued its changes; each sink's worker delivers them
+                workers.kick(jobId);
+                if (state == RunState.NEEDS_REVIEW) {
                     db.update("UPDATE job SET status = 'NEEDS_REVIEW' WHERE id = ?", jobId);
                 } else if (state == RunState.SUCCEEDED) {
                     db.update("UPDATE job SET status = 'ACTIVE' WHERE id = ? AND status = 'NEEDS_REVIEW'", jobId);
