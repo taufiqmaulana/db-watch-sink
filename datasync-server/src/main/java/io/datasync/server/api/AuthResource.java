@@ -15,6 +15,8 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Context;
+import io.datasync.server.auth.LoginThrottle;
+import io.vertx.core.http.HttpServerRequest;
 import jakarta.ws.rs.core.NewCookie;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.SecurityContext;
@@ -47,19 +49,31 @@ public class AuthResource {
     @Inject
     Audit audit;
 
+    @Inject
+    LoginThrottle throttle;
+
     @POST
     @Path("/login")
     @Public
-    public RestResponse<Me> login(Credentials in, @Context SecurityContext security) {
+    public RestResponse<Me> login(Credentials in, @Context SecurityContext security, @Context HttpServerRequest request) {
         String username = in == null || in.username() == null ? "" : in.username().trim();
+        String address = request.remoteAddress() == null ? "unknown" : request.remoteAddress().hostAddress();
+        var locked = throttle.lockedFor(username, address);
+        if (locked.isPresent()) {
+            long minutes = Math.max(1, (locked.get().toSeconds() + 59) / 60);
+            throw new WebApplicationException("Too many failed sign-ins. Try again in " + minutes + " minute" + (minutes == 1 ? "" : "s") + ".",
+                Response.Status.TOO_MANY_REQUESTS);
+        }
         StoredUser user = db.one("SELECT id, username, password_hash, role, must_change_password FROM app_user WHERE username = ?",
             rs -> new StoredUser(rs.getString(1), rs.getString(2), rs.getString(3), Role.valueOf(rs.getString(4)), rs.getBoolean(5)),
             username).orElse(null);
         String password = in == null ? null : in.password();
         if (!Passwords.verify(Objects.requireNonNullElse(password, ""), user == null ? null : user.passwordHash())) {
-            audit.record(username, "auth.login-failed", "auth", Map.of());
+            audit.record(username, "auth.login-failed", "auth", Map.of("address", address));
+            if (throttle.failed(username, address)) audit.record(username, "auth.locked", "auth", Map.of("address", address));
             throw new WebApplicationException("Invalid username or password", Response.Status.UNAUTHORIZED);
         }
+        throttle.succeeded(username);
         Sessions.Session session = sessions.create(user.id(), user.username(), user.role(), user.mustChangePassword());
         audit.record(user.username(), "auth.login", "user:" + user.id(), Map.of());
         return RestResponse.ResponseBuilder.ok(new Me(user.username(), user.role(), user.mustChangePassword()))

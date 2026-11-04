@@ -59,6 +59,17 @@ class ApiTest {
         sql("CREATE TABLE items (id int PRIMARY KEY, label text)", "INSERT INTO items VALUES (1, 'a'), (2, 'b')");
 
         RestAssured.given().basePath(API).get("/jobs").then().statusCode(401);
+        RestAssured.given().get("/q/health/ready").then().statusCode(200).body(containsString("state-store"))
+            .header("Content-Security-Policy", containsString("frame-ancestors 'none'")).header("X-Frame-Options", equalTo("DENY"))
+            .header("X-Content-Type-Options", equalTo("nosniff"));
+
+        // password guessing: the 6th failed sign-in for a username within 15 minutes is refused before checking
+        for (int i = 0; i < 5; i++) {
+            RestAssured.given().basePath(API).contentType(ContentType.JSON).body(Map.of("username", "mallory", "password", "guess" + i))
+                .post("/auth/login").then().statusCode(401);
+        }
+        RestAssured.given().basePath(API).contentType(ContentType.JSON).body(Map.of("username", "mallory", "password", "guess"))
+            .post("/auth/login").then().statusCode(429).body("message", containsString("Too many failed sign-ins"));
         String admin = login("admin", "bootstrap-secret", true);
         as(admin).get("/jobs").then().statusCode(403).body("message", containsString("Change your password"));
         as(admin).body(Map.of("currentPassword", "bootstrap-secret", "newPassword", "admin-password-2"))

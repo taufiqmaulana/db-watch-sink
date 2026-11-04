@@ -19,8 +19,9 @@ import java.util.Base64;
 import java.util.Optional;
 
 /**
- * AES-256-GCM for credentials at rest. The key comes from {@code DATASYNC_MASTER_KEY} (32 bytes, base64);
- * without it, a key file is generated in the data directory.
+ * AES-256-GCM for credentials at rest. The key comes from {@code DATASYNC_MASTER_KEY} (32 bytes, base64). A key file
+ * in the data directory is used instead only when {@code DATASYNC_ALLOW_KEY_FILE} is true (the default in dev and
+ * test): kept next to the state store, it would end up in every copy or backup of the data it protects.
  */
 @Singleton
 public class Secrets {
@@ -31,8 +32,15 @@ public class Secrets {
     private final SecretKeySpec key;
 
     public Secrets(@ConfigProperty(name = "datasync.master-key") Optional<String> masterKey,
-                   @ConfigProperty(name = "datasync.data-dir") String dataDir) {
-        String encoded = masterKey.orElseGet(() -> keyFile(Path.of(dataDir, "master.key")));
+                   @ConfigProperty(name = "datasync.data-dir") String dataDir,
+                   @ConfigProperty(name = "datasync.allow-key-file", defaultValue = "false") boolean allowKeyFile) {
+        Path file = Path.of(dataDir, "master.key");
+        if (masterKey.isEmpty() && !allowKeyFile) {
+            throw new IllegalStateException("Set DATASYNC_MASTER_KEY to a 32-byte base64 key (e.g. openssl rand -base64 32)"
+                + (Files.exists(file) ? ", here the content of " + file.toAbsolutePath() + " to keep the stored credentials readable" : "")
+                + ". To keep the key in the data directory instead, set DATASYNC_ALLOW_KEY_FILE=true.");
+        }
+        String encoded = masterKey.orElseGet(() -> keyFile(file));
         byte[] raw = Base64.getDecoder().decode(encoded.trim());
         if (raw.length != 32) throw new IllegalStateException("DATASYNC_MASTER_KEY must be 32 bytes, base64 encoded");
         key = new SecretKeySpec(raw, "AES");
