@@ -104,14 +104,18 @@ final class DiffRun {
         }
     }
 
-    private void diff(Job job, List<Map<String, Object>> rows) throws SQLException {
+    private void diff(Job job, List<Map<String, Object>> read) throws SQLException {
         ColumnMapping mapping = job.mapping();
-        List<IndexEntry> entries = new ArrayList<>(rows.size());
-        for (Map<String, Object> row : rows) {
+        List<Map<String, Object>> rows = new ArrayList<>(read.size());
+        List<IndexEntry> entries = new ArrayList<>(read.size());
+        for (Map<String, Object> raw : read) {
+            // the cursor keeps the source's own type, since the next read binds it against the source column
+            if (job.watermark() != null) highestWatermark = Watermark.max(highestWatermark, raw.get(job.watermark().column()));
+            Map<String, Object> row = mapping.normalize(raw);
+            rows.add(row);
             for (String k : mapping.sourceKeys()) {
                 if (row.get(k) == null) throw new IllegalStateException("key column " + k + " is null in " + job.readSpec().object());
             }
-            if (job.watermark() != null) highestWatermark = Watermark.max(highestWatermark, row.get(job.watermark().column()));
             String keyJson = Canonical.json(row, mapping.sourceKeys());
             entries.add(new IndexEntry(Canonical.hash(keyJson), keyJson, Canonical.hash(Canonical.values(row, mapping.sourceColumns()))));
         }

@@ -1,5 +1,7 @@
 package io.datasync.core.config;
 
+import io.datasync.api.CanonicalType;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -99,12 +101,29 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
     }
 
     /** {@code include} is {@code "*"} (default) or a list of source column names. */
-    public record ColumnsDef(List<String> include, List<String> exclude, Map<String, String> rename) {
+    public record ColumnsDef(List<String> include, List<String> exclude, Map<String, String> rename,
+                             Map<String, CanonicalType.Kind> coerce, EmptyStrings emptyStrings) {
 
+        /**
+         * {@code coerce} converts a source column to another canonical type (design 4.4: simple type coercion),
+         * e.g. an Oracle NUMBER(1) flag to BOOLEAN. {@code emptyStrings} says what happens to '' in text columns.
+         */
         public ColumnsDef {
             include = Objects.requireNonNullElse(include, List.of("*"));
             exclude = Objects.requireNonNullElse(exclude, List.of());
             rename = Objects.requireNonNullElse(rename, Map.of());
+            coerce = Objects.requireNonNullElse(coerce, Map.of());
+            emptyStrings = Objects.requireNonNullElse(emptyStrings, EmptyStrings.AUTO);
+        }
+
+        public ColumnsDef(List<String> include, List<String> exclude, Map<String, String> rename) {
+            this(include, exclude, rename, null, null);
         }
     }
+
+    /**
+     * Design 5.5: Oracle stores '' as NULL. AUTO stores '' as NULL when a sink does (Oracle), so every target and
+     * the hash index agree; KEEP and EMPTY_TO_NULL force one behaviour. Key columns are never changed.
+     */
+    public enum EmptyStrings { AUTO, KEEP, EMPTY_TO_NULL }
 }

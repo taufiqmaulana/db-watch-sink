@@ -10,6 +10,7 @@ import io.datasync.api.Sink;
 import io.datasync.api.SinkContext;
 import io.datasync.api.SourceConnector;
 import io.datasync.core.config.DataSyncConfig;
+import io.datasync.core.config.DataSyncConfig.EmptyStrings;
 import io.datasync.core.config.DataSyncConfig.JobDef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,18 +62,21 @@ public final class JobRunner {
         return new RunResult(def.name(), runId, outcome, stats, error);
     }
 
-    /** Dry run: resolves the column mapping and reads the first {@code sampleRows} rows. Touches no sink. */
+    /**
+     * Dry run: resolves the column mapping and reads the first {@code sampleRows} rows, converted as sinks would
+     * receive them. Touches no sink, so with {@code emptyStrings: AUTO} empty strings are shown as read.
+     */
     public Preview preview(String jobName, int sampleRows) {
         JobDef def = job(jobName);
         try (SourceConnector source = Connectors.openSource(connection(def.source().connection()))) {
             ObjectSchema schema = source.describe(ObjectRef.parse(def.source().object()));
-            ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys());
+            ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys(), def.columns().emptyStrings() == EmptyStrings.EMPTY_TO_NULL);
             watermark(def, schema);
             List<Map<String, Object>> rows = new ArrayList<>();
             ReadSpec spec = new ReadSpec(schema.ref(), mapping.sourceColumns(), mapping.sourceKeys(),
                 sampleRows, sampleRows, Duration.ofSeconds(def.queryTimeoutSeconds()));
             try (RecordCursor cursor = source.read(spec)) {
-                while (rows.size() < sampleRows && cursor.hasNext()) rows.add(mapping.row(cursor.next()));
+                while (rows.size() < sampleRows && cursor.hasNext()) rows.add(mapping.row(mapping.normalize(cursor.next())));
             }
             List<Preview.ColumnPreview> columns = new ArrayList<>();
             for (int i = 0; i < mapping.sourceColumns().size(); i++) {
@@ -109,15 +113,23 @@ public final class JobRunner {
         Map<String, Sink> sinks = new LinkedHashMap<>();
         try {
             ObjectSchema schema = source.describe(ObjectRef.parse(def.source().object()));
-            ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys());
             Watermark watermark = watermark(def, schema);
+            List<Map<String, Object>> configs = new ArrayList<>();
             for (Map<String, Object> cfg : def.sinks()) {
                 String sinkId = sinkId(cfg);
                 if (sinks.containsKey(sinkId)) throw new IllegalArgumentException("two sinks of job " + def.name() + " write to " + sinkId);
                 Object conn = cfg.get("connection");
-                Sink sink = Connectors.openSink(String.valueOf(cfg.get("type")), conn == null ? null : connection(conn.toString()));
-                sinks.put(sinkId, sink);
-                sink.init(new SinkContext(def.name(), sinkId, cfg), mapping.target());
+                sinks.put(sinkId, Connectors.openSink(String.valueOf(cfg.get("type")), conn == null ? null : connection(conn.toString())));
+                configs.add(cfg);
+            }
+            // sinks are opened first so AUTO can ask them whether they store '' as NULL
+            EmptyStrings empty = def.columns().emptyStrings();
+            boolean emptyToNull = empty == EmptyStrings.EMPTY_TO_NULL
+                || empty == EmptyStrings.AUTO && sinks.values().stream().anyMatch(s -> s.capabilities().emptyStringIsNull());
+            ColumnMapping mapping = ColumnMapping.resolve(schema, def.columns(), def.keys(), emptyToNull);
+            int i = 0;
+            for (Map.Entry<String, Sink> sink : sinks.entrySet()) {
+                sink.getValue().init(new SinkContext(def.name(), sink.getKey(), configs.get(i++)), mapping.target());
             }
             // the watermark column is read even when it is not synced, to move the cursor
             List<String> read = watermark == null || mapping.sourceColumns().contains(watermark.column()) ? mapping.sourceColumns()

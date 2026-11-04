@@ -131,7 +131,7 @@ final class JdbcSink implements Sink {
 
     @Override
     public SinkCapabilities capabilities() {
-        return new SinkCapabilities(true, false, true, 0);
+        return new SinkCapabilities(true, false, true, 0, dialect.emptyStringIsNull());
     }
 
     @Override

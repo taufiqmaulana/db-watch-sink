@@ -54,7 +54,7 @@ class DiffRunTest {
     @BeforeEach
     void setUp() throws Exception {
         state = new StateStore(dir.resolve("state.db"));
-        ColumnMapping mapping = ColumnMapping.resolve(SCHEMA, new ColumnsDef(null, List.of("UPDATED"), Map.of("NAME", "customer_name")), List.of());
+        ColumnMapping mapping = ColumnMapping.resolve(SCHEMA, new ColumnsDef(null, List.of("UPDATED"), Map.of("NAME", "customer_name")), List.of(), false);
         ReadSpec spec = new ReadSpec(SCHEMA.ref(), mapping.sourceColumns(), mapping.sourceKeys(), 100, 2, Duration.ofSeconds(30));
         job = new Job("customers", source, spec, mapping, Map.of("memory:a", sink), 40);
         for (long id = 1; id <= 5; id++) source.put(id, "c" + id, "10.00");
@@ -269,7 +269,7 @@ class DiffRunTest {
 
         @Override public String type() { return "memory"; }
         @Override public void init(SinkContext ctx, ObjectSchema schema) {}
-        @Override public SinkCapabilities capabilities() { return new SinkCapabilities(true, false, true, 0); }
+        @Override public SinkCapabilities capabilities() { return new SinkCapabilities(true, false, true, 0, false); }
         @Override public HealthStatus health() { return new HealthStatus(true, null); }
         @Override public void close() {}
 
