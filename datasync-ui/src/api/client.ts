@@ -23,6 +23,8 @@ export interface JdbcSinkConfig {
   deleteMode: "SOFT" | "HARD" | "IGNORE";
   softDeleteColumn?: string;
   softDeleteFlagColumn?: string;
+  /** Keep each row's hash in a _row_hash column and skip upserts that would not change the row. */
+  rowHash?: boolean;
 }
 
 export const api = createClient<paths>({ baseUrl: "" });

@@ -1160,6 +1160,10 @@ export interface components {
             rename: {
                 [key: string]: string;
             };
+            coerce: {
+                [key: string]: components["schemas"]["Kind"];
+            };
+            emptyStrings: components["schemas"]["EmptyStrings"];
         };
         ConnectionInput: {
             name: string;
@@ -1190,6 +1194,8 @@ export interface components {
             username: string;
             password: string;
         };
+        /** @enum {string} */
+        EmptyStrings: "AUTO" | "KEEP" | "EMPTY_TO_NULL";
         Entry: {
             /** Format: int64 */
             id: number;
@@ -1253,6 +1259,8 @@ export interface components {
             nextRunAt: ((string | components["schemas"]["Instant"] | null) | null) | components["schemas"]["Instant"] | null;
             nextReconcileAt: ((string | components["schemas"]["Instant"] | null) | null) | components["schemas"]["Instant"] | null;
             watermarkValue: string | null;
+            /** Format: int64 */
+            periodSeconds: number;
             config: components["schemas"]["JobDef"];
             createdAt: components["schemas"]["Instant"];
             updatedAt: components["schemas"]["Instant"];

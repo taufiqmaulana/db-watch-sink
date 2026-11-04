@@ -13,6 +13,8 @@ const columnSchema = z.object({
   include: z.boolean(),
   key: z.boolean(),
   rename: z.string(),
+  /** A canonical type to convert the column to, or "" to keep the source type. */
+  coerce: z.string(),
 });
 
 const sinkSchema = z.object({
@@ -22,6 +24,7 @@ const sinkSchema = z.object({
   deleteMode: z.enum(DELETE_MODES),
   softDeleteColumn: z.string().trim().min(1, "Required"),
   softDeleteFlagColumn: z.string().trim().min(1, "Required"),
+  rowHash: z.boolean(),
 });
 
 const CRON_HINT = "Use five fields: minute hour day month weekday";
@@ -42,6 +45,7 @@ export const jobSchema = z.object({
   queryTimeoutSeconds: count(1, 86_400),
   maxDeletePercent: count(0, 100),
   sinks: z.array(sinkSchema).min(1, "Add at least one sink"),
+  emptyStrings: z.enum(["AUTO", "KEEP", "EMPTY_TO_NULL"]),
   scheduleKind: z.enum(["interval", "cron"]),
   every: z.string().refine((s) => !s.trim() || (intervalSeconds(s) ?? 0) >= 10, "Use a number with s, m or h, at least 10s"),
   cron: z.string().refine((s) => !s.trim() || isCron(s), CRON_HINT),
@@ -95,6 +99,7 @@ export const newSink = (target = ""): SinkValues => ({
   deleteMode: "SOFT",
   softDeleteColumn: "_deleted_at",
   softDeleteFlagColumn: "_is_deleted",
+  rowHash: false,
 });
 
 export const emptyJob: JobFormValues = {
@@ -108,6 +113,7 @@ export const emptyJob: JobFormValues = {
   queryTimeoutSeconds: 300,
   maxDeletePercent: 20,
   sinks: [newSink()],
+  emptyStrings: "AUTO",
   scheduleKind: "interval",
   every: "5m",
   cron: "*/5 * * * *",
@@ -140,6 +146,8 @@ export function toJobDef(v: JobFormValues): JobDef {
       rename: Object.fromEntries(
         v.columns.filter((c) => selected(c) && c.rename.trim() && c.rename.trim() !== c.name).map((c) => [c.name, c.rename.trim()]),
       ),
+      coerce: Object.fromEntries(v.columns.filter((c) => selected(c) && c.coerce).map((c) => [c.name, c.coerce])) as JobDef["columns"]["coerce"],
+      emptyStrings: v.emptyStrings,
     },
     mode: v.mode,
     // an empty column or cron means "none"; the fields keep their values in the form while another mode is chosen
@@ -170,6 +178,7 @@ export function fromJobDef(def: JobDef): JobFormValues {
       deleteMode: d.deleteMode,
       softDeleteColumn: d.softDeleteColumn,
       softDeleteFlagColumn: d.softDeleteFlagColumn,
+      rowHash: d.rowHash,
     };
   });
   return {
@@ -182,6 +191,7 @@ export function fromJobDef(def: JobDef): JobFormValues {
     queryTimeoutSeconds: def.queryTimeoutSeconds,
     maxDeletePercent: def.maxDeletePercent,
     sinks,
+    emptyStrings: def.columns.emptyStrings,
     mode: def.mode,
     watermarkColumn: def.watermark.column ?? "",
     overlap: def.watermark.overlap,
@@ -205,6 +215,14 @@ export function columnRows(schema: ObjectSchema, def?: JobDef): ColumnRow[] {
         ? (kind !== "BYTES" || cfg.include.includes(col.name)) && !cfg.exclude.includes(col.name)
         : cfg.include.includes(col.name);
     const key = def?.keys.length ? def.keys.includes(col.name) : schema.keyColumns.includes(col.name);
-    return { name: col.name, type: typeLabel(col.type), kind, include: include || key, key, rename: cfg?.rename[col.name] ?? "" };
+    return {
+      name: col.name,
+      type: typeLabel(col.type),
+      kind,
+      include: include || key,
+      key,
+      rename: cfg?.rename[col.name] ?? "",
+      coerce: cfg?.coerce[col.name] ?? "",
+    };
   });
 }

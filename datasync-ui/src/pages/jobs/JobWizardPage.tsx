@@ -17,6 +17,9 @@ import { columnRows, emptyJob, fromJobDef, jobSchema, modeProblems, newSink, toJ
 
 type Form = UseFormReturn<JobFormValues>;
 
+/** Types a column can be converted to (design 4.4: simple type coercion), e.g. an Oracle NUMBER(1) flag to BOOLEAN. */
+const COERCE_TARGETS = ["BOOLEAN", "INT32", "INT64", "DECIMAL", "FLOAT64", "STRING", "DATE", "TIMESTAMP", "TIMESTAMP_TZ", "JSON", "UUID"];
+
 const STEPS: { title: string; fields: (keyof JobFormValues)[] }[] = [
   { title: "Source", fields: ["name", "sourceConnection", "sourceObject"] },
   { title: "Columns", fields: ["columns"] },
@@ -286,6 +289,7 @@ function ColumnsStep({ form, saved }: { form: Form; saved?: JobDef }) {
             <Th className="w-0">Key</Th>
             <Th>Column</Th>
             <Th>Type</Th>
+            <Th>Sync as</Th>
             <Th>Target name</Th>
           </tr>
         </thead>
@@ -300,11 +304,31 @@ function ColumnsStep({ form, saved }: { form: Form; saved?: JobDef }) {
                 <Td>
                   <Checkbox
                     aria-label={`${f.name} is a key column`}
-                    {...form.register(`columns.${i}.key`, { onChange: (e) => e.target.checked && form.setValue(`columns.${i}.include`, true) })}
+                    {...form.register(`columns.${i}.key`, {
+                      onChange: (e) => {
+                        if (e.target.checked) form.setValue(`columns.${i}.include`, true);
+                        // "pick a key" is checked on the whole list, which a single checkbox does not re-check
+                        if (form.formState.errors.columns) form.trigger("columns");
+                      },
+                    })}
                   />
                 </Td>
                 <Td className="font-mono text-xs">{f.name}</Td>
                 <Td className="text-xs text-muted-foreground">{f.type}</Td>
+                <Td>
+                  {f.kind === "BYTES" ? (
+                    <span className="text-xs text-muted-foreground">Source type</span>
+                  ) : (
+                    <Select aria-label={`Sync ${f.name} as`} className="h-8 w-36 text-xs" {...form.register(`columns.${i}.coerce`)}>
+                      <option value="">Source type</option>
+                      {COERCE_TARGETS.map((kind) => (
+                        <option key={kind} value={kind}>
+                          {kind}
+                        </option>
+                      ))}
+                    </Select>
+                  )}
+                </Td>
                 <Td>
                   <Input aria-label={`Target name for ${f.name}`} placeholder={f.name} className="h-8 font-mono text-xs" {...form.register(`columns.${i}.rename`)} />
                 </Td>
@@ -313,6 +337,19 @@ function ColumnsStep({ form, saved }: { form: Form; saved?: JobDef }) {
           })}
         </tbody>
       </Table>
+      <Field
+        label="Empty text"
+        className="max-w-md"
+        hint="Oracle stores empty text as NULL. Automatic does the same whenever a sink is Oracle, so every target and change detection agree. Key columns are never changed."
+      >
+        {(id) => (
+          <Select id={id} {...form.register("emptyStrings")}>
+            <option value="AUTO">Automatic</option>
+            <option value="KEEP">Keep empty text</option>
+            <option value="EMPTY_TO_NULL">Store empty text as NULL</option>
+          </Select>
+        )}
+      </Field>
     </div>
   );
 }
@@ -526,6 +563,15 @@ function SinksStep({ form }: { form: Form }) {
             <label className="flex items-center gap-2 text-sm">
               <Checkbox {...form.register(`sinks.${i}.autoCreate`)} />
               Create the target table if it does not exist
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <Checkbox className="mt-0.5" {...form.register(`sinks.${i}.rowHash`)} />
+              <span>
+                Skip rewriting unchanged rows
+                <span className="block text-muted-foreground">
+                  Keeps a _row_hash column so re-sent rows (after a crash or a full load) only update rows that changed.
+                </span>
+              </span>
             </label>
             <Field
               label="Deletes"

@@ -23,6 +23,17 @@ describe("job form", () => {
     expect(intervalSeconds("2h")).toBe(7200);
   });
 
+  it("writes coercions of synced columns and reads them back", () => {
+    const columns = columnRows(schema).map((r) =>
+      r.name === "NOTE" ? { ...r, coerce: "INT64" } : r.name === "PHOTO" ? { ...r, coerce: "STRING" } : r,
+    );
+    const def = toJobDef({ ...emptyJob, name: "j", sourceConnection: "c1", sourceObject: "T", columns, emptyStrings: "KEEP" });
+    expect(def.columns.coerce).toEqual({ NOTE: "INT64" }); // PHOTO is not synced, so its coercion is dropped
+    expect(def.columns.emptyStrings).toBe("KEEP");
+    expect(columnRows(schema, def).find((r) => r.name === "NOTE")?.coerce).toBe("INT64");
+    expect(fromJobDef(def).emptyStrings).toBe("KEEP");
+  });
+
   it("writes the watermark and reconcile only for the modes that use them", () => {
     const base = { ...emptyJob, name: "j", sourceConnection: "c1", sourceObject: "T", columns: columnRows(schema), watermarkColumn: "ID" };
     const snapshot = toJobDef(base);
@@ -64,7 +75,13 @@ describe("job form", () => {
 
     expect(def.name).toBe("customers");
     expect(def.keys).toEqual(["ID"]);
-    expect(def.columns).toEqual({ include: ["*", "PHOTO"], exclude: ["NOTE"], rename: { NAME: "customer_name" } });
+    expect(def.columns).toEqual({
+      include: ["*", "PHOTO"],
+      exclude: ["NOTE"],
+      rename: { NAME: "customer_name" },
+      coerce: {},
+      emptyStrings: "AUTO",
+    });
     expect(def.sinks[0]).toMatchObject({ type: "jdbc", connection: "c2", target: "public.customers", deleteMode: "SOFT" });
 
     expect(def).toMatchObject({ every: "5m", schedule: "*/5 * * * *", fixedDelay: false, jitterPercent: 10 });

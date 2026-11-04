@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Pause, Pencil, Play, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, Clock, Pause, Pencil, Play, RefreshCw, Trash2 } from "lucide-react";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, call, type JobView, type RunView } from "@/api/client";
@@ -45,6 +45,8 @@ export function JobDetailPage() {
   const review = j.status === "NEEDS_REVIEW";
   // in watermark modes only a reconcile reads the whole source, so only it can find and apply deletes
   const incremental = j.config.mode !== "SNAPSHOT_DIFF";
+  const averageRunMs = averageDuration(runs.data ?? []);
+  const slow = averageRunMs !== null && averageRunMs > j.periodSeconds * 500;
 
   return (
     <>
@@ -99,6 +101,19 @@ export function JobDetailPage() {
               Apply deletes
             </Button>
           )}
+        </div>
+      )}
+      {slow && (
+        <div className="mb-6 flex gap-2 rounded-lg border border-warning/50 bg-warning/10 px-4 py-3 text-sm">
+          <Clock className="mt-0.5 size-4 shrink-0 text-warning-text" aria-hidden />
+          <div>
+            <p className="font-medium">Runs take more than half the time between them</p>
+            <p className="mt-0.5 text-muted-foreground">
+              Recent runs took {formatMs(averageRunMs)} on average, and the schedule allows {formatMs(j.periodSeconds * 1000)} between
+              runs. A run that is still going when the next is due is skipped. Lengthen the interval
+              {incremental ? "." : ", or switch to Watermark or Hybrid so each run reads only changed rows."}
+            </p>
+          </div>
         </div>
       )}
       <Tabs
@@ -289,4 +304,17 @@ function ConfigYaml({ job }: { job: JobView }) {
     sinks: c.sinks.map((s) => ({ ...s, connection: connectionName(s.connection) })),
   };
   return <pre className="overflow-x-auto font-mono text-xs leading-relaxed">{toYaml(readable)}</pre>;
+}
+
+/** Mean duration of the last 10 finished regular runs (reconciles are full reads by design), or null below 3. */
+function averageDuration(runs: RunView[]) {
+  const durations = runs
+    .filter((r) => r.kind === "POLL" && r.finishedAt)
+    .slice(0, 10)
+    .map((r) => new Date(r.finishedAt!).getTime() - new Date(r.startedAt).getTime());
+  return durations.length < 3 ? null : durations.reduce((a, b) => a + b, 0) / durations.length;
+}
+
+function formatMs(ms: number) {
+  return formatDuration(new Date(0).toISOString(), new Date(ms).toISOString());
 }
