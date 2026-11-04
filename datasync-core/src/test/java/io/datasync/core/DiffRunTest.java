@@ -13,6 +13,7 @@ import io.datasync.api.RecordCursor;
 import io.datasync.api.Sink;
 import io.datasync.api.SinkCapabilities;
 import io.datasync.api.SinkContext;
+import io.datasync.api.SinkException;
 import io.datasync.api.SourceConnector;
 import io.datasync.api.WatermarkSpec;
 import io.datasync.core.config.DataSyncConfig.ColumnsDef;
@@ -62,6 +63,24 @@ class DiffRunTest {
 
     private void useSinks(Map<String, Sink> sinks) {
         job = new Job(job.id(), job.source(), job.readSpec(), job.mapping(), sinks, job.maxDeletePercent(), job.watermark());
+    }
+
+    /** The single sink "memory:a" with this delivery policy, keeping rows when it asks for deleted ones. */
+    private void usePolicy(String maxAttempts, String onDeadLetter) {
+        DeliveryPolicy policy = DeliveryPolicy.of(Map.of("retry", Map.of("maxAttempts", maxAttempts, "initialBackoff", "0s"),
+            "onDeadLetter", onDeadLetter));
+        job = new Job(job.id(), job.source(), job.readSpec(), job.mapping(), Map.of("memory:a", sink), job.maxDeletePercent(),
+            job.watermark(), Map.of("memory:a", policy), sink.wantsDeletedRows);
+    }
+
+    private List<String> deadLetters() throws Exception {
+        return state.transact(c -> {
+            List<String> payloads = new ArrayList<>();
+            try (var rs = c.createStatement().executeQuery("SELECT payload FROM dead_letter ORDER BY created_at")) {
+                while (rs.next()) payloads.add(rs.getString(1));
+            }
+            return payloads;
+        });
     }
 
     /** Makes the job a WATERMARK job on UPDATED with a 5 minute overlap; rows 1..5 were updated 10 minutes apart. */
@@ -208,6 +227,55 @@ class DiffRunTest {
     }
 
     @Test
+    void retryableFailuresAreRetriedAndThenSucceed() throws Exception {
+        usePolicy("3", "PAUSE");
+        sink.failures = 2;
+        assertThat(run(false).upserts()).isEqualTo(5);
+        assertThat(sink.target).hasSize(5);
+        assertThat(deadLetters()).isEmpty();
+    }
+
+    @Test
+    void aPermanentFailureIsDeadLetteredAtOnceAndSkipCarriesOn() throws Exception {
+        usePolicy("5", "SKIP");
+        sink.failures = 1;
+        sink.permanent = true;
+
+        assertThat(run(false).upserts()).isEqualTo(5);
+        assertThat(sink.target).hasSize(3).as("the first chunk of 2 went to the dead letters");
+        List<String> letters = deadLetters();
+        assertThat(letters).hasSize(1);
+        ChangeBatch replay = Batches.decode(letters.getFirst());
+        assertThat(replay.changes()).extracting(c -> c.key().get("ID")).containsExactly(1L, 2L);
+        assertThat(replay.changes().getFirst().row()).containsEntry("customer_name", "c1");
+        assertThat((BigDecimal) replay.changes().getFirst().row().get("BALANCE")).isEqualByComparingTo("10.00");
+        assertThat(state.indexSize("customers")).as("skipped batches still count as seen").isEqualTo(5);
+    }
+
+    @Test
+    void exhaustedRetriesWithPauseStopTheRun() throws Exception {
+        usePolicy("2", "PAUSE");
+        sink.failures = 5;
+        assertThatThrownBy(() -> run(false)).isInstanceOf(DeadLetterPause.class).hasMessageContaining("503 Service Unavailable");
+        assertThat(deadLetters()).hasSize(1);
+        assertThat(state.indexSize("customers")).isZero();
+    }
+
+    @Test
+    void batchesAreSplitToTheSinksLimitAndDeletesCarryTheLastRowWhenAsked() throws Exception {
+        sink.batchLimit = 1;
+        sink.wantsDeletedRows = true;
+        usePolicy("1", "PAUSE");
+        run(false);
+        assertThat(sink.batches).hasSize(5).allSatisfy(b -> assertThat(b.changes()).hasSize(1));
+
+        source.rows.remove(4L);
+        run(false);
+        assertThat(sink.deleted).singleElement()
+            .satisfies(d -> assertThat(d.row()).containsEntry("ID", 4).containsEntry("customer_name", "c4"));
+    }
+
+    @Test
     void failedDeliveryLeavesTheIndexUntouchedSoTheChunkIsResent() throws Exception {
         sink.failing = true;
         assertThatThrownBy(() -> run(false)).hasMessageContaining("sink down");
@@ -266,21 +334,34 @@ class DiffRunTest {
         final Map<Object, Map<String, Object>> target = new LinkedHashMap<>();
         final List<ChangeBatch> batches = new ArrayList<>();
         boolean failing;
+        /** The next this many apply calls fail, retryably unless {@code permanent}. */
+        int failures;
+        boolean permanent;
+        int batchLimit;
+        boolean wantsDeletedRows;
+        final List<Change> deleted = new ArrayList<>();
 
         @Override public String type() { return "memory"; }
         @Override public void init(SinkContext ctx, ObjectSchema schema) {}
-        @Override public SinkCapabilities capabilities() { return new SinkCapabilities(true, false, true, 0, false); }
+        @Override public SinkCapabilities capabilities() { return new SinkCapabilities(true, false, true, batchLimit, false, wantsDeletedRows); }
         @Override public HealthStatus health() { return new HealthStatus(true, null); }
         @Override public void close() {}
 
         @Override
         public ApplyResult apply(ChangeBatch batch) {
             if (failing) throw new IllegalStateException("sink down");
+            if (failures > 0) {
+                failures--;
+                throw permanent ? SinkException.permanent("400 Bad Request", null) : SinkException.retryable("503 Service Unavailable", null, null);
+            }
             batches.add(batch);
             for (Change ch : batch.changes()) {
                 Object id = ((Number) ch.key().get("ID")).longValue();
                 if (ch.op() == Change.Op.UPSERT) target.put(id, ch.row());
-                else target.remove(id);
+                else {
+                    target.remove(id);
+                    deleted.add(ch);
+                }
             }
             return new ApplyResult(batch.changes().size(), 0);
         }

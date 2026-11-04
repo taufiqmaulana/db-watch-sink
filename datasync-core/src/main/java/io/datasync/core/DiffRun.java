@@ -2,12 +2,18 @@ package io.datasync.core;
 
 import io.datasync.api.Change;
 import io.datasync.api.ChangeBatch;
+import io.datasync.api.Column;
 import io.datasync.api.ReadSpec;
 import io.datasync.api.RecordCursor;
+import io.datasync.api.Sink;
+import io.datasync.api.SinkException;
 import io.datasync.api.WatermarkSpec;
 import io.datasync.core.StateStore.IndexEntry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +42,9 @@ final class DiffRun {
     private final String runId;
     private Set<String> loadedSinks;
     private Object highestWatermark;
-    private long rowsRead, upserts, deletes, unchanged, seq, batchId;
+    private static final Logger log = LoggerFactory.getLogger(DiffRun.class);
+
+    private long rowsRead, upserts, deletes, unchanged, seq, batchId, deadLetters;
 
     DiffRun(StateStore state, String runId) {
         this.state = state;
@@ -45,6 +53,11 @@ final class DiffRun {
 
     RunStats stats() {
         return new RunStats(rowsRead, upserts, deletes, unchanged);
+    }
+
+    /** Batches this run moved to the dead letters. */
+    long deadLetters() {
+        return deadLetters;
     }
 
     void run(Job job, RunKind kind, boolean allowDeletes) throws SQLException {
@@ -95,7 +108,8 @@ final class DiffRun {
         for (List<IndexEntry> entries; !(entries = state.unseen(job.id(), runId, job.readSpec().chunkSize())).isEmpty(); ) {
             Instant now = Instant.now();
             List<Change> removed = entries.stream()
-                .map(e -> new Change(Change.Op.DELETE, job.mapping().key(Canonical.parse(e.keyJson())), null, null,
+                .map(e -> new Change(Change.Op.DELETE, job.mapping().key(Canonical.parse(e.keyJson())),
+                    e.rowJson() == null ? null : Canonical.parse(e.rowJson()), null,
                     idempotencyKey(job, e.keyJson(), "del"), now, ++seq))
                 .toList();
             deliver(job, removed, removed);
@@ -117,7 +131,9 @@ final class DiffRun {
                 if (row.get(k) == null) throw new IllegalStateException("key column " + k + " is null in " + job.readSpec().object());
             }
             String keyJson = Canonical.json(row, mapping.sourceKeys());
-            entries.add(new IndexEntry(Canonical.hash(keyJson), keyJson, Canonical.hash(Canonical.values(row, mapping.sourceColumns()))));
+            // the last row delivered, under target names, for sinks that send it with deletes
+            String rowJson = job.keepRows() ? Canonical.json(mapping.row(row), targetColumns(job)) : null;
+            entries.add(new IndexEntry(Canonical.hash(keyJson), keyJson, Canonical.hash(Canonical.values(row, mapping.sourceColumns())), rowJson));
         }
 
         Map<String, String> known = state.rowHashes(job.id(), entries.stream().map(IndexEntry::keyHash).toList());
@@ -142,6 +158,10 @@ final class DiffRun {
         unchanged += rows.size() - changed.size();
     }
 
+    private static List<String> targetColumns(Job job) {
+        return job.mapping().target().columns().stream().map(Column::name).toList();
+    }
+
     private void checkDeleteGuard(Job job, long indexed, long gone) {
         if (indexed > 0 && rowsRead == 0) {
             throw new DeleteGuardException("source returned no rows but the index holds " + indexed + " keys");
@@ -153,13 +173,62 @@ final class DiffRun {
     }
 
     /** {@code changed} goes to fully loaded sinks, {@code all} to sinks still waiting for their full load. */
-    private void deliver(Job job, List<Change> changed, List<Change> all) {
+    private void deliver(Job job, List<Change> changed, List<Change> all) throws SQLException {
         if (changed.isEmpty() && all.isEmpty()) return;
         batchId++;
-        job.sinks().forEach((sinkId, sink) -> {
-            List<Change> batch = loadedSinks.contains(sinkId) ? changed : all;
-            if (!batch.isEmpty()) sink.apply(new ChangeBatch(job.id(), sinkId, batchId, job.mapping().target(), batch));
-        });
+        for (Map.Entry<String, Sink> sink : job.sinks().entrySet()) {
+            List<Change> batch = loadedSinks.contains(sink.getKey()) ? changed : all;
+            if (!batch.isEmpty()) send(job, sink.getKey(), sink.getValue(), batch);
+        }
+    }
+
+    /**
+     * Applies changes to one sink in pieces of its batch limit. A failed piece is retried with backoff per the
+     * sink's policy, then moved to the dead letters (design 6); with onDeadLetter: PAUSE that stops the run.
+     */
+    private void send(Job job, String sinkId, Sink sink, List<Change> changes) throws SQLException {
+        int limit = sink.capabilities().batchLimit();
+        int size = limit > 0 ? limit : changes.size();
+        DeliveryPolicy policy = job.policy(sinkId);
+        for (int from = 0; from < changes.size(); from += size) {
+            ChangeBatch batch = new ChangeBatch(job.id(), sinkId, batchId, job.mapping().target(),
+                changes.subList(from, Math.min(from + size, changes.size())));
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    sink.apply(batch);
+                    break;
+                } catch (RuntimeException e) {
+                    SinkException failure = e instanceof SinkException se ? se : null;
+                    if ((failure == null || failure.retryable()) && attempt < policy.maxAttempts()) {
+                        pause(policy.backoff(attempt, failure == null ? null : failure.retryAfter()));
+                        continue;
+                    }
+                    deadLetter(batch, e, attempt, policy);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void deadLetter(ChangeBatch batch, RuntimeException error, int attempts, DeliveryPolicy policy) throws SQLException {
+        String message = Errors.describe(error);
+        String id = state.addDeadLetter(batch.jobId(), batch.sinkId(), batch.batchId(), batch.changes().size(), Batches.encode(batch),
+            message, attempts);
+        deadLetters++;
+        log.warn("job {} sink {}: {} changes moved to dead letter {} after {} attempts: {}", batch.jobId(), batch.sinkId(),
+            batch.changes().size(), id, attempts, message);
+        if (policy.onDeadLetter() == DeliveryPolicy.OnDeadLetter.PAUSE) {
+            throw new DeadLetterPause("sink " + batch.sinkId() + " could not take a batch, moved to the dead letters: " + message, error);
+        }
+    }
+
+    private static void pause(Duration wait) {
+        try {
+            Thread.sleep(wait);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while waiting to retry", e);
+        }
     }
 
     private static String idempotencyKey(Job job, String keyJson, String rowHashOrDel) {

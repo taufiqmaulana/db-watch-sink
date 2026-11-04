@@ -31,7 +31,8 @@ import java.util.UUID;
 public final class StateStore implements AutoCloseable {
 
     /** A row of the hash index. Hashes are hex strings; {@code keyJson} uses source column names. */
-    record IndexEntry(String keyHash, String keyJson, String rowHash) {}
+    /** {@code rowJson}, the row as last delivered, is kept only when a sink sends deleted rows; null otherwise. */
+    record IndexEntry(String keyHash, String keyJson, String rowHash, String rowJson) {}
 
     private static final HexFormat HEX = HexFormat.of();
     private static final int MAX_BINDS = 500;
@@ -100,14 +101,16 @@ public final class StateStore implements AutoCloseable {
     synchronized void markSeen(String jobId, String runId, List<IndexEntry> entries) throws SQLException {
         inTransaction(() -> {
             try (PreparedStatement ps = conn.prepareStatement("""
-                    INSERT INTO row_index (job_id, key_hash, key_json, row_hash, last_seen_run) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (job_id, key_hash) DO UPDATE SET row_hash = excluded.row_hash, last_seen_run = excluded.last_seen_run""")) {
+                    INSERT INTO row_index (job_id, key_hash, key_json, row_hash, last_seen_run, row_json) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (job_id, key_hash) DO UPDATE SET row_hash = excluded.row_hash, last_seen_run = excluded.last_seen_run,
+                      row_json = excluded.row_json""")) {
                 for (IndexEntry e : entries) {
                     ps.setString(1, jobId);
                     ps.setBytes(2, HEX.parseHex(e.keyHash()));
                     ps.setString(3, e.keyJson());
                     ps.setBytes(4, HEX.parseHex(e.rowHash()));
                     ps.setString(5, runId);
+                    ps.setString(6, e.rowJson());
                     ps.addBatch();
                 }
                 ps.executeBatch();
@@ -127,12 +130,12 @@ public final class StateStore implements AutoCloseable {
     synchronized List<IndexEntry> unseen(String jobId, String runId, int limit) throws SQLException {
         List<IndexEntry> entries = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT key_hash, key_json, row_hash FROM row_index WHERE job_id = ? AND last_seen_run <> ? LIMIT ?")) {
+                "SELECT key_hash, key_json, row_hash, row_json FROM row_index WHERE job_id = ? AND last_seen_run <> ? LIMIT ?")) {
             ps.setString(1, jobId);
             ps.setString(2, runId);
             ps.setInt(3, limit);
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) entries.add(new IndexEntry(HEX.formatHex(rs.getBytes(1)), rs.getString(2), HEX.formatHex(rs.getBytes(3))));
+                while (rs.next()) entries.add(new IndexEntry(HEX.formatHex(rs.getBytes(1)), rs.getString(2), HEX.formatHex(rs.getBytes(3)), rs.getString(4)));
             }
         }
         return entries;
@@ -149,6 +152,27 @@ public final class StateStore implements AutoCloseable {
                 ps.executeBatch();
             }
         });
+    }
+
+    /** Records a batch a sink could not take (design 6) and returns its id. */
+    synchronized String addDeadLetter(String jobId, String sinkId, long batchId, int changeCount, String payload, String error,
+                                      int attempts) throws SQLException {
+        String id = UUID.randomUUID().toString();
+        try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO dead_letter (id, job_id, sink_id, batch_id, change_count, payload, error, attempts, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""")) {
+            ps.setString(1, id);
+            ps.setString(2, jobId);
+            ps.setString(3, sinkId);
+            ps.setLong(4, batchId);
+            ps.setInt(5, changeCount);
+            ps.setString(6, payload);
+            ps.setString(7, error);
+            ps.setInt(8, attempts);
+            ps.setTimestamp(9, Timestamp.from(Instant.now()));
+            ps.executeUpdate();
+        }
+        return id;
     }
 
     /** The job's watermark cursor, if one was saved for {@code column}. */

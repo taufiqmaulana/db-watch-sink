@@ -5,7 +5,8 @@ import java.util.Map;
 
 /**
  * One row change. {@code key} and {@code row} are keyed by target (renamed) column name.
- * {@code row} is null for DELETE.
+ * {@code row} is null for DELETE, unless the sink asked for deleted rows ({@link SinkCapabilities#needsDeletedRows}):
+ * then it is the last row seen for that key, when the engine has it.
  */
 public record Change(
     Op op,
