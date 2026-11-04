@@ -18,7 +18,8 @@ The full design is in [Design.md](Design.md).
 | M3: webhook sink, retries with backoff, dead letters, HMAC signing | Done |
 | M5: Oracle as a sink (MERGE from a global temporary table; Oracle 11g and later) | Done |
 | M7: hardening (metrics, alerts, retention, YAML export and import, JSON logs) | Done |
-| M6 and M8: outbox and independent sink progress, transformations | Not started |
+| M6: outbox, independent sink delivery, resnapshot | Done |
+| M8: transformations | Not started |
 
 ## Requirements
 
@@ -70,6 +71,7 @@ Other endpoints:
 | `datasync_rows_total{job,kind}` | Rows read, upserted, deleted and unchanged (`kind`: read, upsert, delete, unchanged) |
 | `datasync_lag_seconds{job}` | Time since the start of the job's last successful run: how old the synced data may be |
 | `datasync_sink_errors_total{job,sink}` | Failed delivery attempts, retried or not |
+| `datasync_sink_backlog_batches{job,sink}` | Batches queued for the sink |
 | `datasync_dead_letters{job,sink}` | Dead-lettered batches waiting to be retried or discarded |
 | `datasync_skipped_ticks_total{job}` | Scheduled runs skipped because the previous one was still going |
 
@@ -125,20 +127,34 @@ secret. The secret is stored encrypted like database passwords. A webhook sink p
 - Any 2xx response is success. 429, 5xx, timeouts and refused connections are retried; `Retry-After` is honoured.
   Other responses are not retried.
 
-### Retries and dead letters
+### Sinks, retries and dead letters
 
-Every sink retries a failed batch with growing waits (1 s, 2 s, 4 s and so on, up to 1 minute, with jitter),
-5 attempts by default. A batch that still fails goes to the **dead letters**. Then, by default, the run stops
-and the job is **paused** until an operator resumes it; with **Skip it and carry on** (`onDeadLetter: SKIP`)
-the run continues. The **Dead letters** page shows each batch, its error and its changes. **Retry** sends it
-again once the sink is fixed, and **Discard** drops it. Both are recorded in the audit log.
+A run writes the changes it finds to a queue (the job's outbox) in the same transaction that records them as seen.
+Each sink then delivers from that queue on its own, in order, so a slow or failing sink holds up no other sink and
+no run. The job page's **Sinks** tab shows each sink's status, how many batches are waiting, and its last error.
+
+A failed batch is retried with growing waits (1 s, 2 s, 4 s and so on, up to 1 minute, with jitter), 5 attempts by
+default. A batch that still fails goes to the **dead letters**. Then, by default, that sink is **paused** until an
+operator clicks **Resume**, while its new changes keep queueing; with **Skip it and carry on**
+(`onDeadLetter: SKIP`) it continues with the next batch. The **Dead letters** page shows each batch, its error and
+its changes. **Retry** sends it again once the sink is fixed, and **Discard** drops it. Both are recorded in the
+audit log.
+
+A sink more than 1000 batches behind (`outbox.maxBatches`, **Sink backlog limit** in the wizard) stops and is
+marked **Needs resnapshot**, so the queue stays bounded. **Resnapshot** on the Sinks tab drops what it was waiting
+for and starts a run that sends it every source row, as for a newly added sink. It also helps after a target table
+was emptied by hand.
+
+The command line runs each job, then delivers to every sink, waiting through retries. It exits with 1 when a sink
+is left paused or needing a resnapshot; its changes stay queued in the state file for the next run.
 
 ### Alerts, retention and configuration as YAML
 
 Under **Settings**, admins choose who gets alerts (email addresses and a webhook URL; Slack and Teams incoming
 webhooks work as is) and when: a job failed a number of runs in a row (3 by default), an active job has had no
 successful run for some minutes (off by default), a batch went to the dead letters, or the delete guard stopped a
-run. **Send test alert** checks the channels. Sent alerts are recorded in the audit log.
+run. A sink that dead-letters a batch or needs a resnapshot is alerted under the dead-letter rule.
+**Send test alert** checks the channels. Sent alerts are recorded in the audit log.
 
 Finished runs and resolved dead letters older than the retention period (30 days by default) are removed hourly.
 Each job keeps its latest run.
@@ -154,7 +170,8 @@ For a full backup, copy the data directory (the SQLite file and `master.key`) wh
 Roles:
 
 - **Viewer** sees everything except users and alert settings.
-- **Operator** can also run, pause and resume jobs, apply deletes, and retry or discard dead letters.
+- **Operator** can also run, pause and resume jobs, apply deletes, retry or discard dead letters, and resume or
+  resnapshot sinks.
 - **Admin** can also manage connections, jobs, users and settings, and import configuration.
 
 ## Run from the command line

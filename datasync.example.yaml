@@ -37,6 +37,7 @@ jobs:
     # every: 30s                      # or a fixed interval (at least 10s), which wins over schedule
     # fixedDelay: true                # count the interval from the end of each run, not its start
     jitterPercent: 10
+    outbox: { maxBatches: 1000 }      # a sink further behind than this needs a resnapshot
     sinks:
       - type: jdbc
         connection: pg_dw
@@ -45,7 +46,7 @@ jobs:
         deleteMode: SOFT                # SOFT | HARD | IGNORE
         rowHash: true                   # keep a _row_hash column and skip rewriting unchanged rows
         retry: { maxAttempts: 5, initialBackoff: 1s, maxBackoff: 1m }   # every sink; these are the defaults
-        onDeadLetter: PAUSE             # PAUSE (stop the run and pause the job) | SKIP (carry on)
+        onDeadLetter: PAUSE             # PAUSE (pause this sink until resumed) | SKIP (carry on)
       - type: webhook
         connection: crm_hook            # or give url, auth: { type, username, secret } inline
         batch: { mode: per-batch, maxRows: 500 }   # or mode: per-row
