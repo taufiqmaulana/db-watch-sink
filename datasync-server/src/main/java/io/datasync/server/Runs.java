@@ -15,6 +15,7 @@ import org.eclipse.microprofile.openapi.annotations.media.Schema;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
@@ -50,6 +51,15 @@ public class Runs {
     @Inject
     Audit audit;
 
+    @Inject
+    Metrics metrics;
+
+    @Inject
+    Alerts alerts;
+
+    @Inject
+    Housekeeping housekeeping;
+
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Set<String> running = ConcurrentHashMap.newKeySet();
     private final Map<String, Semaphore> connectionSlots = new ConcurrentHashMap<>();
@@ -78,6 +88,7 @@ public class Runs {
             List<Semaphore> slots = slots(config);
             slots.forEach(Semaphore::acquireUninterruptibly);
             try {
+                Instant started = Instant.now();
                 RunResult result = new JobRunner(config, db.store()).run(jobId, kind, allowDeletes);
                 runId = result.runId();
                 state = result.state();
@@ -91,6 +102,10 @@ public class Runs {
                 } else if (state == RunState.SUCCEEDED) {
                     db.update("UPDATE job SET status = 'ACTIVE' WHERE id = ? AND status = 'NEEDS_REVIEW'", jobId);
                 }
+                String name = configs.job(jobId).name();
+                metrics.recordRun(name, result, Duration.between(started, Instant.now()));
+                alerts.afterRun(jobId, name, result);
+                housekeeping.refresh();
             } catch (Exception e) {
                 Log.errorf(e, "run of job %s could not be recorded", jobId);
             } finally {

@@ -205,7 +205,7 @@ public class JobResource {
         events.publish(new Events.Event("job-changed", id, null, null));
     }
 
-    private JobDef validate(JobDef def, String selfId) {
+    JobDef validate(JobDef def, String selfId) {
         return validate(def, selfId, true);
     }
 

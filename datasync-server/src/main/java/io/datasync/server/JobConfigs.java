@@ -52,6 +52,14 @@ public class JobConfigs {
         return new ConnectionConfig(id, props.get("kind"), props);
     }
 
+    /** A sink id ("type:connection id[:target]") with the connection's name instead of its id, for metrics and messages. */
+    public String sinkLabel(String sinkId) {
+        String[] parts = sinkId.split(":", 3);
+        if (parts.length < 2) return sinkId;
+        String name = db.one("SELECT name FROM connection WHERE id = ?", rs -> rs.getString(1), parts[1]).orElse(parts[1]);
+        return parts.length == 3 ? name + ":" + parts[2] : name;
+    }
+
     public static Set<String> connectionIds(JobDef def) {
         Set<String> ids = new LinkedHashSet<>();
         if (def.source() != null && def.source().connection() != null) ids.add(def.source().connection());

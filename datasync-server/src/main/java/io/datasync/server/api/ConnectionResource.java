@@ -189,7 +189,7 @@ public class ConnectionResource {
         return name;
     }
 
-    private static String configJson(ConnectionInput in) {
+    static String configJson(ConnectionInput in) {
         Map<String, Object> config = new LinkedHashMap<>();
         config.put("url", in.url().trim());
         if (in.username() != null && !in.username().isBlank()) config.put("username", in.username().trim());

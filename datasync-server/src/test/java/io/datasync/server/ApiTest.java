@@ -1,7 +1,9 @@
 package io.datasync.server;
 
 import com.sun.net.httpserver.HttpServer;
+import io.quarkus.mailer.MockMailbox;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
 import io.restassured.specification.RequestSpecification;
@@ -42,6 +44,15 @@ class ApiTest {
     static {
         PG.start();
     }
+
+    @Inject
+    MockMailbox mailbox;
+
+    @Inject
+    Housekeeping housekeeping;
+
+    @Inject
+    Db db;
 
     @Test
     void managesAndRunsAJob() throws Exception {
@@ -122,6 +133,71 @@ class ApiTest {
         RestAssured.given().get("/metrics").then().statusCode(200).body(containsString("jvm_memory_used_bytes"));
 
         deadLettersAreRetriedOnceTheWebhookIsBack(admin, connId);
+        alertsMetricsAndConfigAsCode(admin, connId);
+    }
+
+    /** Design 12 and 13: alert channels and rules, engine metrics, YAML export and import. */
+    private void alertsMetricsAndConfigAsCode(String admin, String connId) throws Exception {
+        as(admin).get("/settings").then().statusCode(200).body("alerts.failedRuns", equalTo(3)).body("retentionDays", equalTo(30));
+        List<String> alerts = new CopyOnWriteArrayList<>();
+        HttpServer channel = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        channel.createContext("/alerts", exchange -> {
+            alerts.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        channel.start();
+        try {
+            Map<String, Object> rules = Map.of("emails", List.of("ops@example.com"),
+                "webhookUrl", "http://127.0.0.1:" + channel.getAddress().getPort() + "/alerts",
+                "failedRuns", 1, "lagMinutes", 0, "deadLetters", true, "deleteGuard", true);
+            as(admin).body(Map.of("alerts", Map.of("emails", List.of("not-an-address")), "retentionDays", 30)).put("/settings")
+                .then().statusCode(400).body("message", containsString("not-an-address"));
+            as(admin).body(rules).post("/settings/alerts/test").then().statusCode(200).body("sent", equalTo(List.of("email", "webhook")));
+            assertThat(mailbox.getMailsSentTo("ops@example.com")).hasSize(1);
+            as(admin).body(Map.of("alerts", rules, "retentionDays", 14)).put("/settings").then().statusCode(200).body("retentionDays", equalTo(14));
+
+            // a run that fails raises the "failed 1 run in a row" alert by email and webhook
+            Map<String, Object> broken = Map.of("name", "broken", "source", Map.of("connection", connId, "object", "public.missing"),
+                "sinks", List.of(Map.of("type", "jdbc", "connection", connId, "target", "public.broken_copy")));
+            String jobId = as(admin).body(Map.of("config", broken)).post("/jobs").then().statusCode(201).extract().path("id");
+            as(admin).post("/jobs/" + jobId + "/run").then().statusCode(202);
+            awaitRunFinished(admin, jobId);
+            assertThat(alerts).anySatisfy(a -> assertThat(a).contains("JOB_FAILED").contains("Job broken failed 1 run in a row"));
+            assertThat(mailbox.getMailsSentTo("ops@example.com")).hasSize(2);
+            as(admin).get("/audit").then().body("action", hasItem("alert.job-failed"));
+
+            String metrics = RestAssured.given().get("/metrics").then().statusCode(200).extract().asString();
+            assertThat(metrics).contains("datasync_run_duration_seconds_count{job=\"broken\"}")
+                .contains("datasync_rows_total{job=\"items_sync\",kind=\"upsert\"}")
+                .contains("datasync_lag_seconds{job=\"items_sync\"}");
+
+            // export, then import it back: unchanged except the fixed job; a dry run keeps nothing
+            String yaml = as(admin).get("/export").then().statusCode(200).extract().asString();
+            assertThat(yaml).contains("name: broken").contains("connection: pg").contains("${env:PG_PASSWORD}")
+                .doesNotContain(connId);
+            String fixed = yaml.replace("public.missing", "public.items");
+            as(admin).contentType("application/yaml").body(fixed.getBytes(StandardCharsets.UTF_8)).queryParam("dryRun", true).post("/import").then().statusCode(200)
+                .body("dryRun", equalTo(true))
+                .body("items.find { it.name == 'pg' }.action", equalTo("UNCHANGED"))
+                .body("items.find { it.name == 'items_sync' }.action", equalTo("UNCHANGED"))
+                .body("items.find { it.name == 'broken' }.action", equalTo("UPDATE"));
+            as(admin).get("/jobs/" + jobId).then().body("config.source.object", equalTo("public.missing"));
+            as(admin).contentType("application/yaml").body(fixed.replace("name: broken", "name: fixed").getBytes(StandardCharsets.UTF_8)).post("/import").then().statusCode(200)
+                .body("items.find { it.name == 'fixed' }.action", equalTo("CREATE"));
+            as(admin).get("/jobs").then().body("find { it.name == 'fixed' }.config.source.object", equalTo("public.items"));
+            as(admin).contentType("application/yaml").body("jobs:\n  - name: orphan\n    source: { connection: nowhere, object: x }\n".getBytes(StandardCharsets.UTF_8))
+                .post("/import").then().statusCode(400).body("message", equalTo("Job orphan: unknown connection nowhere"));
+
+            // retention (14 days, set above) prunes older finished runs but keeps each job's latest
+            Instant old = Instant.now().minus(Duration.ofDays(20));
+            db.update("INSERT INTO run (id, job_id, kind, state, started_at, finished_at) VALUES ('old-run', ?, 'POLL', 'FAILED', ?, ?)",
+                jobId, old, old);
+            assertThat(housekeeping.prune()).isEqualTo(1);
+            as(admin).get("/jobs/" + jobId + "/runs").then().body("size()", equalTo(1));
+        } finally {
+            channel.stop(0);
+        }
     }
 
     /** Design 6: a webhook that is down dead-letters the batch and pauses the job; a retry delivers it later. */
