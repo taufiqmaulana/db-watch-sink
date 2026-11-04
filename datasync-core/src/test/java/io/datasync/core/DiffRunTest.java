@@ -233,6 +233,7 @@ class DiffRunTest {
         assertThat(run(false).upserts()).isEqualTo(5);
         assertThat(sink.target).hasSize(5);
         assertThat(deadLetters()).isEmpty();
+        assertThat(failures()).isEqualTo(new RunResult.SinkFailures(2, 0));
     }
 
     @Test
@@ -250,6 +251,7 @@ class DiffRunTest {
         assertThat(replay.changes().getFirst().row()).containsEntry("customer_name", "c1");
         assertThat((BigDecimal) replay.changes().getFirst().row().get("BALANCE")).isEqualByComparingTo("10.00");
         assertThat(state.indexSize("customers")).as("skipped batches still count as seen").isEqualTo(5);
+        assertThat(failures()).isEqualTo(new RunResult.SinkFailures(1, 1));
     }
 
     @Test
@@ -290,10 +292,17 @@ class DiffRunTest {
     }
 
     private RunStats run(RunKind kind, boolean allowDeletes) throws Exception {
-        DiffRun diff = new DiffRun(state, state.startRun("customers", kind.name()));
-        diff.run(job, kind, allowDeletes);
-        return diff.stats();
+        lastRun = new DiffRun(state, state.startRun("customers", kind.name()));
+        lastRun.run(job, kind, allowDeletes);
+        return lastRun.stats();
     }
+
+    /** The one sink's failures in the last run. */
+    private RunResult.SinkFailures failures() {
+        return lastRun.sinkFailures().values().stream().findFirst().orElse(new RunResult.SinkFailures(0, 0));
+    }
+
+    private DiffRun lastRun;
 
     static final class FakeSource implements SourceConnector {
         final Map<Long, Map<String, Object>> rows = new LinkedHashMap<>();

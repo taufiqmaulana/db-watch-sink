@@ -15,6 +15,7 @@ import io.datasync.core.config.DataSyncConfig.EmptyStrings;
 import io.datasync.core.config.DataSyncConfig.JobDef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.sql.SQLException;
 import java.time.Duration;
@@ -44,6 +45,9 @@ public final class JobRunner {
         JobDef def = job(jobName);
         String runId = state.startRun(def.name(), kind.name());
         DiffRun diff = new DiffRun(state, runId);
+        // design 12: log lines of a run carry its job and run ids
+        MDC.put("jobId", def.name());
+        MDC.put("runId", runId);
         RunState outcome = RunState.SUCCEEDED;
         String error = null;
         boolean pauseJob = false;
@@ -62,10 +66,14 @@ public final class JobRunner {
             log.error("job {} run {} failed", def.name(), runId, e);
         }
         RunStats stats = diff.stats();
+        Map<String, RunResult.SinkFailures> failures = diff.sinkFailures();
+        long deadLetters = failures.values().stream().mapToLong(RunResult.SinkFailures::deadLetters).sum();
         state.finishRun(runId, outcome, stats, error);
         log.info("job {} run {}: {} (read {}, upserts {}, deletes {}, unchanged {}, dead letters {}){}", def.name(), runId, outcome,
-            stats.rowsRead(), stats.upserts(), stats.deletes(), stats.unchanged(), diff.deadLetters(), error == null ? "" : ": " + error);
-        return new RunResult(def.name(), runId, outcome, stats, error, pauseJob);
+            stats.rowsRead(), stats.upserts(), stats.deletes(), stats.unchanged(), deadLetters, error == null ? "" : ": " + error);
+        MDC.remove("jobId");
+        MDC.remove("runId");
+        return new RunResult(def.name(), runId, outcome, stats, error, pauseJob, failures);
     }
 
     /**

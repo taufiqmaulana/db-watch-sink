@@ -16,6 +16,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,7 +45,8 @@ final class DiffRun {
     private Object highestWatermark;
     private static final Logger log = LoggerFactory.getLogger(DiffRun.class);
 
-    private long rowsRead, upserts, deletes, unchanged, seq, batchId, deadLetters;
+    private final Map<String, long[]> failures = new LinkedHashMap<>();   // sink id -> {attempts, dead letters}
+    private long rowsRead, upserts, deletes, unchanged, seq, batchId;
 
     DiffRun(StateStore state, String runId) {
         this.state = state;
@@ -55,9 +57,11 @@ final class DiffRun {
         return new RunStats(rowsRead, upserts, deletes, unchanged);
     }
 
-    /** Batches this run moved to the dead letters. */
-    long deadLetters() {
-        return deadLetters;
+    /** Sinks that failed at least once in this run, so far. */
+    Map<String, RunResult.SinkFailures> sinkFailures() {
+        Map<String, RunResult.SinkFailures> out = new LinkedHashMap<>();
+        failures.forEach((sink, f) -> out.put(sink, new RunResult.SinkFailures(f[0], f[1])));
+        return out;
     }
 
     void run(Job job, RunKind kind, boolean allowDeletes) throws SQLException {
@@ -198,6 +202,7 @@ final class DiffRun {
                     sink.apply(batch);
                     break;
                 } catch (RuntimeException e) {
+                    failures.computeIfAbsent(sinkId, k -> new long[2])[0]++;
                     SinkException failure = e instanceof SinkException se ? se : null;
                     if ((failure == null || failure.retryable()) && attempt < policy.maxAttempts()) {
                         pause(policy.backoff(attempt, failure == null ? null : failure.retryAfter()));
@@ -214,7 +219,7 @@ final class DiffRun {
         String message = Errors.describe(error);
         String id = state.addDeadLetter(batch.jobId(), batch.sinkId(), batch.batchId(), batch.changes().size(), Batches.encode(batch),
             message, attempts);
-        deadLetters++;
+        failures.computeIfAbsent(batch.sinkId(), k -> new long[2])[1]++;
         log.warn("job {} sink {}: {} changes moved to dead letter {} after {} attempts: {}", batch.jobId(), batch.sinkId(),
             batch.changes().size(), id, attempts, message);
         if (policy.onDeadLetter() == DeliveryPolicy.OnDeadLetter.PAUSE) {
