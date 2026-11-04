@@ -16,6 +16,7 @@ import { Field, Input, Select } from "@/components/ui/form";
 import { Card, CardHeader, PageHeader, Spinner, Table, Td, Th } from "@/components/ui/layout";
 import { Tabs } from "@/components/ui/tabs";
 import { formatDateTime } from "@/lib/format";
+import { AlertsPanel, ConfigPanel } from "./SettingsPanels";
 
 const ROLES: Record<Role, string> = {
   VIEWER: "Viewer: read only",
@@ -205,7 +206,18 @@ export function SettingsPage() {
   return (
     <>
       <PageHeader title="Settings" />
-      <Tabs tabs={canAdmin ? [{ value: "users", label: "Users", content: <UsersPanel /> }, audit] : [audit]} />
+      <Tabs
+        tabs={[
+          ...(canAdmin
+            ? [
+                { value: "users", label: "Users", content: <UsersPanel /> },
+                { value: "alerts", label: "Alerts and retention", content: <AlertsPanel /> },
+              ]
+            : []),
+          { value: "config", label: "Configuration", content: <ConfigPanel canImport={canAdmin} /> },
+          audit,
+        ]}
+      />
     </>
   );
 }

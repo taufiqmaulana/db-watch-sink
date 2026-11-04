@@ -11,6 +11,7 @@ export const keys = {
   objects: (id: string, schema: string) => ["connections", id, "objects", schema] as const,
   objectSchema: (id: string, name: string) => ["connections", id, "schema", name] as const,
   users: ["users"] as const,
+  settings: ["settings"] as const,
   audit: (entity?: string) => ["audit", entity ?? "all"] as const,
   deadLetters: (jobId: string, status: string) => ["dead-letters", jobId, status] as const,
   deadLetter: (id: string) => ["dead-letters", "one", id] as const,
