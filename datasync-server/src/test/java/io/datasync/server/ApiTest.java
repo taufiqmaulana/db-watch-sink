@@ -114,6 +114,7 @@ class ApiTest {
 
         as(admin).get("/audit").then().statusCode(200).body("action", hasItem("job.run"));
         as(admin).get("/overview").then().statusCode(200).body("jobs", equalTo(1)).body("runs24h", greaterThanOrEqualTo(3));
+        RestAssured.given().get("/metrics").then().statusCode(200).body(containsString("jvm_memory_used_bytes"));
     }
 
     private static String login(String username, String password, boolean mustChange) {

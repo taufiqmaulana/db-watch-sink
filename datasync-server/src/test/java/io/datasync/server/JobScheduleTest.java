@@ -39,6 +39,12 @@ class JobScheduleTest {
     }
 
     @Test
+    void periodIsTheIntervalOrTheGapBetweenCronRuns() {
+        assertThat(JobSchedule.of(job(null, "30s")).period()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(JobSchedule.of(job("*/5 * * * *", null)).period()).isEqualTo(Duration.ofMinutes(5));
+    }
+
+    @Test
     void onlyHybridJobsReconcileAndTheyMustSayWhen() {
         assertThat(JobSchedule.reconcile(job(null, null))).isEmpty();
         assertThat(JobSchedule.reconcile(hybrid("0 2 * * *"))).isPresent();

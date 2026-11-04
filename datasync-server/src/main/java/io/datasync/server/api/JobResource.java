@@ -46,10 +46,12 @@ public class JobResource {
     /**
      * {@code nextRunAt} and {@code nextReconcileAt} (HYBRID only) are set only while the job is ACTIVE.
      * {@code watermarkValue} is the highest watermark delivered so far, for WATERMARK and HYBRID jobs.
+     * {@code periodSeconds} is the time between scheduled runs, for warning when runs take longer than half of it.
      */
     public record JobView(String id, String name, Status status, int version, boolean running, @Schema(nullable = true) RunView lastRun,
                           @Schema(nullable = true) Instant nextRunAt, @Schema(nullable = true) Instant nextReconcileAt,
-                          @Schema(nullable = true) String watermarkValue, JobDef config, Instant createdAt, Instant updatedAt) {}
+                          @Schema(nullable = true) String watermarkValue, long periodSeconds, JobDef config, Instant createdAt,
+                          Instant updatedAt) {}
 
     /** {@code version} is required on update and must match the stored one (optimistic locking). */
     public record JobInput(JobDef config, Integer version) {}
@@ -267,6 +269,6 @@ public class JobResource {
         return new JobView(id, rs.getString("name"), status, rs.getInt("version"), runs.isRunning(id), latest.get(id),
             active ? scheduler.next(id, RunKind.POLL).orElse(null) : null,
             active ? scheduler.next(id, RunKind.RECONCILE).orElse(null) : null,
-            watermark, config, Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
+            watermark, JobSchedule.of(config).period().toSeconds(), config, Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
     }
 }

@@ -62,6 +62,13 @@ public record JobSchedule(ExecutionTime cron, Duration every, boolean fixedDelay
             .orElseThrow(() -> new IllegalStateException("cron expression has no future run"));
     }
 
+    /** The time between runs; for a cron expression, between its next two runs. */
+    public Duration period() {
+        if (every != null) return every;
+        Instant next = next(Instant.now());
+        return Duration.between(next, next(next));
+    }
+
     /** A random delay of up to {@code jitterPercent} of the time between runs, to spread jobs that share a source. */
     public Duration jitter(Instant planned) {
         long periodMs = Duration.between(planned, next(planned)).toMillis();

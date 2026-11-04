@@ -2,6 +2,7 @@ package io.datasync.server;
 
 import io.datasync.core.RunKind;
 import io.datasync.core.config.DataSyncConfig.JobDef;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.logging.Log;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
@@ -48,6 +49,9 @@ public class Scheduler {
 
     private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Planned> planned = new ConcurrentHashMap<>();
+    @Inject
+    MeterRegistry meters;
+
     private final String holder = hostName() + "/" + UUID.randomUUID();
     private volatile boolean leader;
 
@@ -99,8 +103,8 @@ public class Scheduler {
             due = leader && isActive(jobId);
             if (due) {
                 run = runs.start(jobId, kind, false);
-                if (run == null) Log.infof("job %s is still running, %s its scheduled %s", jobId,
-                    kind == RunKind.RECONCILE ? "retrying" : "skipped", kind.name().toLowerCase());
+                if (run == null && kind == RunKind.POLL) skipped(jobId);
+                if (run == null && kind == RunKind.RECONCILE) Log.infof("job %s is still running, retrying its scheduled reconcile", jobId);
             }
         } catch (RuntimeException e) {
             Log.errorf(e, "scheduled %s of job %s could not start", kind.name().toLowerCase(), jobId);
@@ -113,6 +117,13 @@ public class Scheduler {
         } else {
             plan(jobId, kind, schedule.fixedDelay() ? Instant.now() : base);
         }
+    }
+
+    /** Design 5A: a tick that finds the previous run still going is skipped and counted in datasync_skipped_ticks_total. */
+    private void skipped(String jobId) {
+        String name = db.one("SELECT name FROM job WHERE id = ?", rs -> rs.getString(1), jobId).orElse(jobId);
+        meters.counter("datasync.skipped.ticks", "job", name).increment();
+        Log.infof("job %s is still running, skipped its scheduled run", name);
     }
 
     private Optional<JobSchedule> load(String jobId, RunKind kind) {
