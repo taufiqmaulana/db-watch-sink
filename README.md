@@ -1,6 +1,6 @@
 # DataSync
 
-Polling-based sync of database tables and views to other databases. DataSync reads a source with a plain
+Polling-based sync of database tables and views to other databases and to webhooks. DataSync reads a source with a plain
 read-only `SELECT` account, detects inserts, updates and deletes, and applies them to one or more sinks. It
 needs no triggers, LogMiner or replication slots on the source. A web UI manages connections and jobs and
 shows their runs.
@@ -15,7 +15,7 @@ The full design is in [Design.md](Design.md).
 | M4: REST API and management UI | Done |
 | M2: scheduler (cron or interval, skip-on-overlap, jitter, per-connection concurrency cap, lease) | Done in the server; the CLI still runs each job once |
 | M2: watermark and hybrid modes, reconcile | Done |
-| M3: webhook sink, retries and dead letters | Not started |
+| M3: webhook sink, retries with backoff, dead letters, HMAC signing | Done |
 | M5: Oracle as a sink (MERGE from a global temporary table; Oracle 11g and later) | Done |
 | M6 to M8: outbox and multi-sink fan-out, hardening, transformations | Not started |
 
@@ -52,6 +52,7 @@ Open http://localhost:8080 and sign in as `admin`. You are asked to choose a new
 | `DATASYNC_DATA_DIR` | `data` | Holds the SQLite state store: configuration, run history, hash index, users and audit log |
 | `DATASYNC_MASTER_KEY` | generated into `<data dir>/master.key` | AES-256 key (32 bytes, base64) that encrypts stored database passwords. Back it up: without it, stored credentials cannot be decrypted |
 | `DATASYNC_ADMIN_PASSWORD` | random, printed to the log | Password of the `admin` user created on first start |
+| `DATASYNC_WEBHOOK_BLOCK_PRIVATE_NETWORKS` | `false` | Also refuse webhook URLs on loopback and private networks. Link-local addresses (such as cloud metadata at 169.254.169.254) are always refused |
 | `QUARKUS_HTTP_PORT` | `8080` | HTTP port |
 
 Other endpoints:
@@ -63,8 +64,8 @@ Other endpoints:
 
 ### Using the UI
 
-1. **Connections**: add the source and target databases, then click **Test**. Sources only need an account
-   with `SELECT`.
+1. **Connections**: add the source and target databases, and any webhooks, then click **Test**. Sources only
+   need an account with `SELECT`.
 2. **Jobs, then New job**: pick the source table or view, the columns and the key column, the delete guard and
    the sinks. The last step is a dry run that shows the column mapping and sample rows. A job can be saved
    only after its dry run succeeds.
@@ -93,10 +94,38 @@ comes back at the source, both are cleared. When a run would delete more than th
 percentage, it stops before deleting and the job is marked **Needs review**. Check the source, then use
 **Apply deletes** on the job page if the deletes are real.
 
+### Webhooks
+
+A webhook connection holds the endpoint URL and its authentication: none, a bearer token, basic, or an HMAC
+secret. The secret is stored encrypted like database passwords. A webhook sink posts changes as JSON:
+
+```json
+{ "job": "customers_sync", "batchId": 42, "object": "HR.CUSTOMERS_V",
+  "changes": [ { "op": "upsert", "key": { "CUSTOMER_ID": 7 }, "row": { "...": "..." },
+                 "idempotencyKey": "9f2c...", "observedAt": "2026-11-04T07:19:07Z" },
+               { "op": "delete", "key": { "CUSTOMER_ID": 8 }, "idempotencyKey": "...", "observedAt": "..." } ] }
+```
+
+- Each request carries `Idempotency-Key` (the same when a batch is re-sent) and `X-DataSync-Job`. With HMAC
+  auth it also carries `X-DataSync-Signature: sha256=<hex HMAC-SHA256 of the body>`.
+- Changes are sent up to 500 a request by default, or one a request.
+- With **Send the row flagged as deleted** (`deleteAs: upsert-with-flag`), a delete is sent as an upsert of the
+  last row seen with `"_is_deleted": true`, for consumers that only upsert.
+- Any 2xx response is success. 429, 5xx, timeouts and refused connections are retried; `Retry-After` is honoured.
+  Other responses are not retried.
+
+### Retries and dead letters
+
+Every sink retries a failed batch with growing waits (1 s, 2 s, 4 s and so on, up to 1 minute, with jitter),
+5 attempts by default. A batch that still fails goes to the **dead letters**. Then, by default, the run stops
+and the job is **paused** until an operator resumes it; with **Skip it and carry on** (`onDeadLetter: SKIP`)
+the run continues. The **Dead letters** page shows each batch, its error and its changes. **Retry** sends it
+again once the sink is fixed, and **Discard** drops it. Both are recorded in the audit log.
+
 Roles:
 
 - **Viewer** sees everything except users.
-- **Operator** can also run, pause and resume jobs, and apply deletes.
+- **Operator** can also run, pause and resume jobs, apply deletes, and retry or discard dead letters.
 - **Admin** can also manage connections, jobs and users.
 
 ## Run from the command line
@@ -157,8 +186,9 @@ cd datasync-ui && npm run gen:api
 |---|---|
 | `datasync-core` | Snapshot-diff and watermark logic against fake connectors, config loading |
 | `datasync-dialect-*` | SQL generation, type mapping, `COPY` escaping |
-| `datasync-cli` | End to end through the CLI: Postgres to Postgres (snapshot and hybrid), Oracle to Postgres, Postgres to Oracle (Docker) |
-| `datasync-server` | The REST API end to end with a real Postgres (Docker), password hashing |
+| `datasync-sink-webhook` | Envelope, auth headers and HMAC, retryable and permanent failures, address blocking, against a local HTTP server |
+| `datasync-cli` | End to end through the CLI: Postgres to Postgres (snapshot and hybrid), Oracle to Postgres, Postgres to Oracle, Postgres to a webhook (Docker) |
+| `datasync-server` | The REST API end to end with a real Postgres (Docker), including dead letters and their retry; password hashing |
 | `datasync-ui` | Job form conversion and the YAML view (`npm test`) |
 
 ## Project layout
@@ -169,6 +199,7 @@ datasync-core/              engine: config, snapshot diff, hash index, SQLite st
 datasync-jdbc/              generic JDBC source and sink, dialect SPI
 datasync-dialect-oracle/    Oracle dialect (source and sink, 11g and later)
 datasync-dialect-postgres/  PostgreSQL dialect (source and sink, COPY-based loading)
+datasync-sink-webhook/      webhook sink: JSON over HTTP, auth and HMAC signing, SSRF protection
 datasync-cli/               YAML-driven command-line runner
 datasync-server/            Quarkus app: REST API, sessions and roles, run executor, live events (SSE)
 datasync-ui/                React UI (Vite, TypeScript, TanStack Query, Tailwind), bundled into the server

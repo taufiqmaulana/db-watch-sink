@@ -10,6 +10,11 @@ connections:
     url: jdbc:postgresql://pg-host:5432/dw
     username: sync_rw
     password: ${env:PG_PASSWORD}
+  - name: crm_hook                      # a webhook: url and auth; the secret can come from the environment
+    kind: webhook
+    url: https://crm.example.com/hooks/customers
+    authType: HMAC                      # NONE | BEARER | BASIC | HMAC
+    password: ${env:CRM_HOOK_SECRET}    # the token, basic password or HMAC secret
 
 jobs:
   - name: customers_sync
@@ -39,3 +44,12 @@ jobs:
         autoCreate: true
         deleteMode: SOFT                # SOFT | HARD | IGNORE
         rowHash: true                   # keep a _row_hash column and skip rewriting unchanged rows
+        retry: { maxAttempts: 5, initialBackoff: 1s, maxBackoff: 1m }   # every sink; these are the defaults
+        onDeadLetter: PAUSE             # PAUSE (stop the run and pause the job) | SKIP (carry on)
+      - type: webhook
+        connection: crm_hook            # or give url, auth: { type, username, secret } inline
+        batch: { mode: per-batch, maxRows: 500 }   # or mode: per-row
+        deleteAs: delete                # or upsert-with-flag: the last row with "_is_deleted": true
+        timeoutSeconds: 10
+        # headers: { X-Team: data }
+        onDeadLetter: SKIP
