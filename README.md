@@ -17,7 +17,8 @@ The full design is in [Design.md](Design.md).
 | M2: watermark and hybrid modes, reconcile | Done |
 | M3: webhook sink, retries with backoff, dead letters, HMAC signing | Done |
 | M5: Oracle as a sink (MERGE from a global temporary table; Oracle 11g and later) | Done |
-| M6 to M8: outbox and multi-sink fan-out, hardening, transformations | Not started |
+| M7: hardening (metrics, alerts, retention, YAML export and import, JSON logs) | Done |
+| M6 and M8: outbox and independent sink progress, transformations | Not started |
 
 ## Requirements
 
@@ -52,6 +53,8 @@ Open http://localhost:8080 and sign in as `admin`. You are asked to choose a new
 | `DATASYNC_DATA_DIR` | `data` | Holds the SQLite state store: configuration, run history, hash index, users and audit log |
 | `DATASYNC_MASTER_KEY` | generated into `<data dir>/master.key` | AES-256 key (32 bytes, base64) that encrypts stored database passwords. Back it up: without it, stored credentials cannot be decrypted |
 | `DATASYNC_ADMIN_PASSWORD` | random, printed to the log | Password of the `admin` user created on first start |
+| `DATASYNC_LOG_JSON` | `false` | Log as JSON lines, with `jobId` and `runId` on the lines of a run |
+| `QUARKUS_MAILER_HOST`, `_PORT`, `_FROM`, `_USERNAME`, `_PASSWORD`, `_TLS` | none | SMTP server for alert emails. Set them before adding email recipients under **Settings, Alerts and retention** |
 | `DATASYNC_WEBHOOK_BLOCK_PRIVATE_NETWORKS` | `false` | Also refuse webhook URLs on loopback and private networks. Link-local addresses (such as cloud metadata at 169.254.169.254) are always refused |
 | `QUARKUS_HTTP_PORT` | `8080` | HTTP port |
 
@@ -59,8 +62,16 @@ Other endpoints:
 
 - REST API: `/api/v1`, described by the OpenAPI document at `/q/openapi`
 - Health checks: `/q/health/live` and `/q/health/ready`
-- Prometheus metrics: `/metrics`, including `datasync_skipped_ticks_total{job}` (scheduled runs skipped because
-  the previous one was still going). Like the health checks, it needs no sign-in; restrict it at your proxy if needed.
+- Prometheus metrics: `/metrics`. Like the health checks, it needs no sign-in; restrict it at your proxy if needed.
+
+| Metric | Meaning |
+|---|---|
+| `datasync_run_duration_seconds{job}` | Run durations (count, sum, max) |
+| `datasync_rows_total{job,kind}` | Rows read, upserted, deleted and unchanged (`kind`: read, upsert, delete, unchanged) |
+| `datasync_lag_seconds{job}` | Time since the start of the job's last successful run: how old the synced data may be |
+| `datasync_sink_errors_total{job,sink}` | Failed delivery attempts, retried or not |
+| `datasync_dead_letters{job,sink}` | Dead-lettered batches waiting to be retried or discarded |
+| `datasync_skipped_ticks_total{job}` | Scheduled runs skipped because the previous one was still going |
 
 ### Using the UI
 
@@ -122,11 +133,29 @@ and the job is **paused** until an operator resumes it; with **Skip it and carry
 the run continues. The **Dead letters** page shows each batch, its error and its changes. **Retry** sends it
 again once the sink is fixed, and **Discard** drops it. Both are recorded in the audit log.
 
+### Alerts, retention and configuration as YAML
+
+Under **Settings**, admins choose who gets alerts (email addresses and a webhook URL; Slack and Teams incoming
+webhooks work as is) and when: a job failed a number of runs in a row (3 by default), an active job has had no
+successful run for some minutes (off by default), a batch went to the dead letters, or the delete guard stopped a
+run. **Send test alert** checks the channels. Sent alerts are recorded in the audit log.
+
+Finished runs and resolved dead letters older than the retention period (30 days by default) are removed hourly.
+Each job keeps its latest run.
+
+**Configuration** downloads every connection and job as YAML in the CLI's format, so it can be kept in Git or
+moved to another server. Passwords are written as `${env:<CONNECTION>_PASSWORD}` references. Importing a file
+first shows what it would create or update; connections and jobs are matched by name. An unset `${env:...}`
+password keeps the stored one. The API equivalents are `GET /api/v1/export` and
+`POST /api/v1/import?dryRun=true` with the YAML as the body.
+
+For a full backup, copy the data directory (the SQLite file and `master.key`) while the server is stopped.
+
 Roles:
 
-- **Viewer** sees everything except users.
+- **Viewer** sees everything except users and alert settings.
 - **Operator** can also run, pause and resume jobs, apply deletes, and retry or discard dead letters.
-- **Admin** can also manage connections, jobs and users.
+- **Admin** can also manage connections, jobs, users and settings, and import configuration.
 
 ## Run from the command line
 
@@ -188,7 +217,7 @@ cd datasync-ui && npm run gen:api
 | `datasync-dialect-*` | SQL generation, type mapping, `COPY` escaping |
 | `datasync-sink-webhook` | Envelope, auth headers and HMAC, retryable and permanent failures, address blocking, against a local HTTP server |
 | `datasync-cli` | End to end through the CLI: Postgres to Postgres (snapshot and hybrid), Oracle to Postgres, Postgres to Oracle, Postgres to a webhook (Docker) |
-| `datasync-server` | The REST API end to end with a real Postgres (Docker), including dead letters and their retry; password hashing |
+| `datasync-server` | The REST API end to end with a real Postgres (Docker): dead letters and their retry, alerts, metrics, export and import, retention; password hashing |
 | `datasync-ui` | Job form conversion and the YAML view (`npm test`) |
 
 ## Project layout
