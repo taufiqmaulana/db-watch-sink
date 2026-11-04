@@ -1,0 +1,26 @@
+# Example deployment (design 14). Put it behind a TLS proxy; do not expose port 8080 to the internet.
+#   export DATASYNC_MASTER_KEY=$(openssl rand -base64 32)   # keep it safe and separate from backups of the volume
+#   export DATASYNC_ADMIN_PASSWORD='choose-a-password'
+#   docker compose up -d
+services:
+  datasync:
+    build: .
+    image: datasync:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      DATASYNC_MASTER_KEY: ${DATASYNC_MASTER_KEY:?set DATASYNC_MASTER_KEY}
+      DATASYNC_ADMIN_PASSWORD: ${DATASYNC_ADMIN_PASSWORD:-}
+      # DATASYNC_LOG_JSON: "true"
+      # DATASYNC_WEBHOOK_BLOCK_PRIVATE_NETWORKS: "true"
+      # QUARKUS_MAILER_HOST: smtp.example.com
+      # QUARKUS_MAILER_FROM: datasync@example.com
+      JAVA_OPTS_APPEND: "-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError"
+    volumes:
+      - datasync-data:/data
+    mem_limit: 512m
+    stop_grace_period: 30s
+
+volumes:
+  datasync-data:
