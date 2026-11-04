@@ -27,7 +27,7 @@ const STEPS: { title: string; fields: (keyof JobFormValues)[] }[] = [
     title: "Detection & schedule",
     fields: [
       ...["mode", "watermarkColumn", "overlap", "reconcileCron"] as const,
-      ...["scheduleKind", "every", "cron", "jitterPercent", "batchSize", "fetchSize", "queryTimeoutSeconds", "maxDeletePercent"] as const,
+      ...["scheduleKind", "every", "cron", "jitterPercent", "batchSize", "fetchSize", "queryTimeoutSeconds", "maxDeletePercent", "maxBacklog"] as const,
     ],
   },
   { title: "Sinks", fields: ["sinks"] },
@@ -377,7 +377,7 @@ const LARGE_TABLE_ROWS = 100_000;
 
 function DetectionStep({ form, lastRowsRead }: { form: Form; lastRowsRead?: number }) {
   const { errors } = form.formState;
-  const number = (name: "batchSize" | "fetchSize" | "queryTimeoutSeconds" | "maxDeletePercent" | "jitterPercent") =>
+  const number = (name: "batchSize" | "fetchSize" | "queryTimeoutSeconds" | "maxDeletePercent" | "jitterPercent" | "maxBacklog") =>
     form.register(name, { valueAsNumber: true });
   const [kind, mode, columns] = form.watch(["scheduleKind", "mode", "columns"]);
   const candidates = columns.filter((c) => WATERMARK_KINDS.includes(c.kind));
@@ -494,6 +494,13 @@ function DetectionStep({ form, lastRowsRead }: { form: Form; lastRowsRead?: numb
           {(id) => <Input id={id} type="number" {...number("queryTimeoutSeconds")} />}
         </Field>
       </div>
+      <Field
+        label="Sink backlog limit (batches)"
+        hint="Each sink delivers on its own. One that falls further behind than this, e.g. while paused, stops and needs a resnapshot to be loaded again."
+        error={errors.maxBacklog?.message}
+      >
+        {(id) => <Input id={id} type="number" min={10} max={100_000} className="w-28" {...number("maxBacklog")} />}
+      </Field>
     </div>
   );
 }
@@ -690,13 +697,13 @@ function SinksStep({ form }: { form: Form }) {
                 label="When a batch still fails"
                 hint={
                   form.watch(`sinks.${i}.onDeadLetter`) === "PAUSE"
-                    ? "The batch goes to the dead letters and the job pauses until you resume it."
-                    : "The batch goes to the dead letters and the run carries on with the next one."
+                    ? "The batch goes to the dead letters and this sink pauses until you resume it. Other sinks carry on."
+                    : "The batch goes to the dead letters and this sink carries on with the next one."
                 }
               >
                 {(id) => (
                   <Select id={id} {...form.register(`sinks.${i}.onDeadLetter`)}>
-                    <option value="PAUSE">Pause the job</option>
+                    <option value="PAUSE">Pause this sink</option>
                     <option value="SKIP">Skip it and carry on</option>
                   </Select>
                 )}

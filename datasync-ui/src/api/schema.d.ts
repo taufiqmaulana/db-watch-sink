@@ -1055,6 +1055,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{id}/resnapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resnapshot */
+        post: {
+            parameters: {
+                query?: {
+                    sink?: string;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobView"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{id}/resume": {
         parameters: {
             query?: never;
@@ -1068,6 +1108,46 @@ export interface paths {
         post: {
             parameters: {
                 query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobView"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/resume-sink": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Sink */
+        post: {
+            parameters: {
+                query?: {
+                    sink?: string;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -1673,6 +1753,7 @@ export interface components {
             jitterPercent: number;
             watermark: components["schemas"]["WatermarkDef"];
             reconcile: components["schemas"]["ReconcileDef"];
+            outbox: components["schemas"]["OutboxDef"];
         };
         JobInput: {
             config: components["schemas"]["JobDef"];
@@ -1693,6 +1774,7 @@ export interface components {
             /** Format: int64 */
             periodSeconds: number;
             config: components["schemas"]["JobDef"];
+            sinks: components["schemas"]["SinkView"][];
             createdAt: components["schemas"]["Instant"];
             updatedAt: components["schemas"]["Instant"];
         };
@@ -1721,6 +1803,10 @@ export interface components {
             columns: components["schemas"]["Column"][];
             keyColumns: string[];
         };
+        OutboxDef: {
+            /** Format: int32 */
+            maxBatches: number;
+        };
         Overview: {
             /** Format: int32 */
             jobs: number;
@@ -1742,6 +1828,8 @@ export interface components {
             rowsChanged24h: number;
             /** Format: int32 */
             openDeadLetters: number;
+            /** Format: int32 */
+            stoppedSinks: number;
         };
         PasswordChange: {
             currentPassword: string;
@@ -1781,6 +1869,22 @@ export interface components {
         };
         Selection: {
             ids: string[];
+        };
+        /** @enum {string} */
+        SinkStatus: "ACTIVE" | "PAUSED" | "RESNAPSHOT_REQUIRED";
+        SinkView: {
+            id: string;
+            label: string;
+            status: components["schemas"]["SinkStatus"];
+            /** Format: int64 */
+            backlog: number;
+            /** Format: int32 */
+            attempts: number;
+            nextRetryAt: ((string | components["schemas"]["Instant"] | null) | null) | components["schemas"]["Instant"] | null;
+            lastError: string | null;
+            deliveredAt: ((string | components["schemas"]["Instant"] | null) | null) | components["schemas"]["Instant"] | null;
+            delivering: boolean;
+            loaded: boolean;
         };
         SourceDef: {
             connection: string;

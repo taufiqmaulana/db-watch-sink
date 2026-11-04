@@ -186,7 +186,14 @@ export function JobsPage() {
                   <Td>
                     {job.config.sinks.map((s, i) => (
                       <div key={i}>
-                        <p>{connectionName(s.connection)}</p>
+                        <p>
+                          {connectionName(s.connection)}
+                          {job.sinks[i] && job.sinks[i].status !== "ACTIVE" && (
+                            <span className="ml-2 text-xs font-medium text-critical-text">
+                              {job.sinks[i].status === "PAUSED" ? "paused" : "needs resnapshot"}
+                            </span>
+                          )}
+                        </p>
                         <p className="font-mono text-xs text-muted-foreground">{sinkTarget(s)}</p>
                       </div>
                     ))}

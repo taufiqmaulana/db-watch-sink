@@ -53,6 +53,8 @@ export const jobSchema = z.object({
   fetchSize: count(1, 100_000),
   queryTimeoutSeconds: count(1, 86_400),
   maxDeletePercent: count(0, 100),
+  /** Batches a sink may fall behind before it needs a resnapshot (outbox.maxBatches). */
+  maxBacklog: count(10, 100_000),
   sinks: z.array(sinkSchema).min(1, "Add at least one sink"),
   emptyStrings: z.enum(["AUTO", "KEEP", "EMPTY_TO_NULL"]),
   scheduleKind: z.enum(["interval", "cron"]),
@@ -98,7 +100,7 @@ export function sinkTarget(s: JobDef["sinks"][number]) {
 
 /** "soft deletes", or for a webhook "batches of 500, deletes as flagged upserts". */
 export function describeSinkDelivery(s: JobDef["sinks"][number]) {
-  const failed = s.onDeadLetter === "SKIP" ? "skips failed batches" : "pauses on failure";
+  const failed = s.onDeadLetter === "SKIP" ? "skips failed batches" : "pauses when a batch fails";
   if (s.type !== "webhook") return `${String(s.deleteMode ?? "SOFT").toLowerCase()} deletes, ${failed}`;
   const w = s as unknown as Extract<SinkConfig, { type: "webhook" }>;
   const batching = w.batch?.mode === "per-row" ? "one change a request" : `up to ${w.batch?.maxRows ?? 500} changes a request`;
@@ -173,6 +175,7 @@ export const emptyJob: JobFormValues = {
   fetchSize: 5_000,
   queryTimeoutSeconds: 300,
   maxDeletePercent: 20,
+  maxBacklog: 1000,
   sinks: [newSink()],
   emptyStrings: "AUTO",
   scheduleKind: "interval",
@@ -218,6 +221,7 @@ export function toJobDef(v: JobFormValues): JobDef {
     fetchSize: v.fetchSize,
     queryTimeoutSeconds: v.queryTimeoutSeconds,
     maxDeletePercent: v.maxDeletePercent,
+    outbox: { maxBatches: v.maxBacklog },
     sinks: sinks as unknown as JobDef["sinks"],
     // an empty interval means "use the cron expression"
     schedule: v.cron.trim() || emptyJob.cron,
@@ -239,6 +243,7 @@ export function fromJobDef(def: JobDef): JobFormValues {
     fetchSize: def.fetchSize,
     queryTimeoutSeconds: def.queryTimeoutSeconds,
     maxDeletePercent: def.maxDeletePercent,
+    maxBacklog: def.outbox.maxBatches,
     sinks,
     emptyStrings: def.columns.emptyStrings,
     mode: def.mode,

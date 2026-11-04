@@ -16,6 +16,7 @@ import { formatDateTime, formatDuration, formatNumber, formatRelative } from "@/
 import { toYaml } from "@/lib/yaml";
 import { nextRunLabel, useConnectionNames, useJobActions } from "./actions";
 import { describeMode, describeSchedule, describeSinkDelivery, sinkTarget } from "./jobForm";
+import { SinksPanel } from "./SinksPanel";
 
 // Recharts is large; load it only when a job page shows the chart
 const RunsChart = lazy(() => import("./RunsChart"));
@@ -103,6 +104,20 @@ export function JobDetailPage() {
           )}
         </div>
       )}
+      {j.sinks.some((s) => s.status !== "ACTIVE") && (
+        <div className="mb-6 flex gap-2 rounded-lg border border-critical/40 bg-critical/10 px-4 py-3 text-sm">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-critical-text" aria-hidden />
+          <div>
+            <p className="font-medium">
+              {j.sinks
+                .filter((s) => s.status !== "ACTIVE")
+                .map((s) => `${s.label} ${s.status === "PAUSED" ? "is paused" : "needs a resnapshot"}`)
+                .join("; ")}
+            </p>
+            <p className="mt-0.5 text-muted-foreground">Its changes are kept for it. See the Sinks tab to resume or resnapshot it.</p>
+          </div>
+        </div>
+      )}
       {slow && (
         <div className="mb-6 flex gap-2 rounded-lg border border-warning/50 bg-warning/10 px-4 py-3 text-sm">
           <Clock className="mt-0.5 size-4 shrink-0 text-warning-text" aria-hidden />
@@ -120,6 +135,7 @@ export function JobDetailPage() {
         tabs={[
           { value: "overview", label: "Overview", content: <Overview job={j} runs={runs.data ?? []} /> },
           { value: "runs", label: "Runs", content: <RunsTable runs={runs.data} error={runs.error} /> },
+          { value: "sinks", label: "Sinks", content: <SinksPanel job={j} /> },
           {
             value: "config",
             label: "Config",

@@ -107,7 +107,7 @@ export function AlertsPanel() {
             {errors.lagMinutes && <span className="text-xs text-critical-text">{errors.lagMinutes.message}</span>}
           </div>
           <label className="flex items-center gap-2 text-sm">
-            <Checkbox {...form.register("deadLetters")} />a batch is moved to the dead letters
+            <Checkbox {...form.register("deadLetters")} />a sink moves a batch to the dead letters or falls too far behind
           </label>
           <label className="flex items-center gap-2 text-sm">
             <Checkbox {...form.register("deleteGuard")} />the delete guard stops a run
