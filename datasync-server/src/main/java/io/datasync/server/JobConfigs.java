@@ -32,10 +32,18 @@ public class JobConfigs {
             .orElseThrow(() -> new NotFoundException("Job not found"));
     }
 
-    /** The engine config for {@code def}, which runs under the name {@code jobId}. */
+    /**
+     * The engine config for {@code def}, which runs under the name {@code jobId}. Sinks get the job's own name
+     * as {@code jobName}, for what they show consumers (the webhook envelope).
+     */
     public DataSyncConfig engineConfig(String jobId, JobDef def) {
         List<Map<String, Object>> connections = connectionIds(def).stream().map(this::connectionProps).toList();
-        return new DataSyncConfig(connections, List.of(def.withName(jobId)));
+        List<Map<String, Object>> sinks = def.sinks().stream().map(s -> {
+            Map<String, Object> sink = new LinkedHashMap<>(s);
+            sink.put("jobName", def.name());
+            return sink;
+        }).toList();
+        return new DataSyncConfig(connections, List.of(def.withName(jobId).withSinks(sinks)));
     }
 
     public ConnectionConfig connection(String id) {

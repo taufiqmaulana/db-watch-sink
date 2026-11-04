@@ -2,6 +2,8 @@ package io.datasync.server.api;
 
 import io.datasync.api.ObjectRef;
 import io.datasync.api.ObjectSchema;
+import io.datasync.api.Sink;
+import io.datasync.api.SinkContext;
 import io.datasync.api.SourceConnector;
 import io.datasync.core.Connectors;
 import io.datasync.core.Errors;
@@ -29,24 +31,34 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
-/** Connections to source and sink databases. Passwords are write-only: accepted, stored encrypted, never returned. */
+/**
+ * Connections to source and sink databases, and to webhook consumers (kind "webhook", sink only, whose url is the
+ * endpoint and whose password is the bearer token, basic password or HMAC secret per {@code authType}).
+ * Passwords are write-only: accepted, stored encrypted, never returned.
+ */
 @Path("/connections")
 public class ConnectionResource {
 
     public enum ConnectionRole { SOURCE, SINK, BOTH }
 
     public record ConnectionView(String id, String name, String kind, ConnectionRole role, String url, @Schema(nullable = true) String username,
-                                 int maxConcurrency, boolean hasPassword, Instant createdAt, Instant updatedAt) {}
+                                 @Schema(nullable = true) String authType, int maxConcurrency, boolean hasPassword, Instant createdAt,
+                                 Instant updatedAt) {}
 
-    /** On update, an empty password keeps the stored one. */
+    /** On update, an empty password keeps the stored one. {@code authType} (NONE, BEARER, BASIC, HMAC) is for webhooks. */
     public record ConnectionInput(String name, String kind, ConnectionRole role, String url, @Schema(nullable = true) String username,
-                                  String password, Integer maxConcurrency) {}
+                                  String password, @Schema(nullable = true) String authType, Integer maxConcurrency) {}
 
     public record TestResult(boolean ok, String message, @Schema(nullable = true) String detail) {}
+
+    private static final String WEBHOOK = "webhook";
+    private static final Set<String> AUTH_TYPES = Set.of("NONE", "BEARER", "BASIC", "HMAC");
 
     private static final String SELECT = "SELECT id, name, kind, role, config_json, secret_enc IS NOT NULL AS has_password,"
         + " max_concurrency, created_at, updated_at FROM connection";
@@ -114,7 +126,7 @@ public class ConnectionResource {
     @Path("/{id}/test")
     @Requires(Role.OPERATOR)
     public TestResult test(String id) {
-        get(id);
+        if (WEBHOOK.equals(get(id).kind())) return testWebhook(id);
         try (SourceConnector ignored = Connectors.openSource(configs.connection(id))) {
             return new TestResult(true, "Connected", null);
         } catch (RuntimeException e) {
@@ -122,11 +134,22 @@ public class ConnectionResource {
         }
     }
 
+    /** Any HTTP answer counts: the consumer may refuse the HEAD request and still be there. */
+    private TestResult testWebhook(String id) {
+        try (Sink sink = Connectors.openSink(WEBHOOK, configs.connection(id))) {
+            sink.init(new SinkContext("connection-test", WEBHOOK + ":" + id, Map.of()), null);
+            var health = sink.health();
+            return health.up() ? new TestResult(true, "Reachable", health.detail()) : new TestResult(false, "Could not reach", health.detail());
+        } catch (RuntimeException e) {
+            return new TestResult(false, "Could not reach", Errors.describe(e));
+        }
+    }
+
     /** Tables and views, optionally limited to one schema. */
     @GET
     @Path("/{id}/objects")
     public List<ObjectRef> objects(String id, @RestQuery String schema) {
-        get(id);
+        database(id);
         try (SourceConnector source = Connectors.openSource(configs.connection(id))) {
             return source.listObjects(schema == null || schema.isBlank() ? null : schema.trim());
         }
@@ -136,19 +159,29 @@ public class ConnectionResource {
     @GET
     @Path("/{id}/objects/{name}/schema")
     public ObjectSchema schema(String id, String name) {
-        get(id);
+        database(id);
         try (SourceConnector source = Connectors.openSource(configs.connection(id))) {
             return source.describe(ObjectRef.parse(name));
         }
+    }
+
+    private void database(String id) {
+        if (WEBHOOK.equals(get(id).kind())) throw new IllegalArgumentException("A webhook connection has no tables");
     }
 
     /** Checks the input and returns the trimmed name. */
     private String validate(ConnectionInput in, String selfId) {
         if (in == null) throw new IllegalArgumentException("Connection details are required");
         String name = ApiErrors.required(in.name(), "Name");
-        if (!Connectors.supportsSource(in.kind())) throw new IllegalArgumentException("Unsupported connection type: " + in.kind());
+        boolean webhook = WEBHOOK.equals(in.kind());
+        if (!webhook && !Connectors.supportsSource(in.kind())) throw new IllegalArgumentException("Unsupported connection type: " + in.kind());
         if (in.role() == null) throw new IllegalArgumentException("Role is required");
-        ApiErrors.required(in.url(), "JDBC URL");
+        String url = ApiErrors.required(in.url(), webhook ? "URL" : "JDBC URL");
+        if (webhook) {
+            if (in.role() != ConnectionRole.SINK) throw new IllegalArgumentException("A webhook can only be a sink");
+            if (!url.matches("(?i)https?://.+")) throw new IllegalArgumentException("The URL must start with http:// or https://");
+            if (!AUTH_TYPES.contains(authType(in))) throw new IllegalArgumentException("Unknown auth type " + in.authType());
+        }
         ApiErrors.range(maxConcurrency(in), 1, 32, "Max concurrency");
         boolean taken = db.one("SELECT id FROM connection WHERE name = ?", rs -> rs.getString(1), name)
             .filter(id -> !id.equals(selfId)).isPresent();
@@ -160,7 +193,12 @@ public class ConnectionResource {
         Map<String, Object> config = new LinkedHashMap<>();
         config.put("url", in.url().trim());
         if (in.username() != null && !in.username().isBlank()) config.put("username", in.username().trim());
+        if (WEBHOOK.equals(in.kind())) config.put("authType", authType(in));
         return Json.write(config);
+    }
+
+    private static String authType(ConnectionInput in) {
+        return in.authType() == null || in.authType().isBlank() ? "NONE" : in.authType().trim().toUpperCase(Locale.ROOT);
     }
 
     private byte[] secret(ConnectionInput in) {
@@ -175,6 +213,6 @@ public class ConnectionResource {
         Map<String, Object> config = Json.map(rs.getString("config_json"));
         return new ConnectionView(rs.getString("id"), rs.getString("name"), rs.getString("kind"),
             ConnectionRole.valueOf(rs.getString("role")), (String) config.get("url"), (String) config.get("username"),
-            rs.getInt("max_concurrency"), rs.getBoolean("has_password"), Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
+            (String) config.get("authType"), rs.getInt("max_concurrency"), rs.getBoolean("has_password"), Db.instant(rs, "created_at"), Db.instant(rs, "updated_at"));
     }
 }

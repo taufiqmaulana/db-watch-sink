@@ -1,5 +1,6 @@
 package io.datasync.server;
 
+import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
@@ -7,6 +8,9 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -14,6 +18,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -115,6 +120,65 @@ class ApiTest {
         as(admin).get("/audit").then().statusCode(200).body("action", hasItem("job.run"));
         as(admin).get("/overview").then().statusCode(200).body("jobs", equalTo(1)).body("runs24h", greaterThanOrEqualTo(3));
         RestAssured.given().get("/metrics").then().statusCode(200).body(containsString("jvm_memory_used_bytes"));
+
+        deadLettersAreRetriedOnceTheWebhookIsBack(admin, connId);
+    }
+
+    /** Design 6: a webhook that is down dead-letters the batch and pauses the job; a retry delivers it later. */
+    private static void deadLettersAreRetriedOnceTheWebhookIsBack(String admin, String dbConnId) throws Exception {
+        int port;
+        try (ServerSocket free = new ServerSocket(0)) {
+            port = free.getLocalPort();
+        }
+        String hookId = as(admin).body(Map.of("name", "hook", "kind", "webhook", "role", "SINK",
+                "url", "http://127.0.0.1:" + port + "/hook", "authType", "HMAC", "password", "hook-secret"))
+            .post("/connections").then().statusCode(201).body("authType", equalTo("HMAC")).extract().path("id");
+        as(admin).post("/connections/" + hookId + "/test").then().statusCode(200).body("ok", equalTo(false));
+        as(admin).get("/connections/" + hookId + "/objects").then().statusCode(400);
+
+        Map<String, Object> config = Map.of(
+            "name", "items_hook",
+            "source", Map.of("connection", dbConnId, "object", "public.items"),
+            "sinks", List.of(Map.of("type", "webhook", "connection", hookId, "retry", Map.of("maxAttempts", 1))));
+        as(admin).body(Map.of("config", Map.of("name", "bad", "source", config.get("source"),
+                "sinks", List.of(Map.of("type", "webhook", "connection", dbConnId)))))
+            .post("/jobs").then().statusCode(400).body("message", equalTo("A webhook sink needs a webhook connection"));
+        String jobId = as(admin).body(Map.of("config", config)).post("/jobs").then().statusCode(201).extract().path("id");
+        as(admin).post("/jobs/" + jobId + "/run").then().statusCode(202);
+        awaitRunFinished(admin, jobId);
+        as(admin).get("/jobs/" + jobId).then().body("status", equalTo("PAUSED")).body("lastRun.state", equalTo("FAILED"));
+        String deadLetterId = as(admin).queryParam("jobId", jobId).get("/dead-letters").then().statusCode(200)
+            .body("size()", equalTo(1)).body("[0].changeCount", equalTo(2)).body("[0].jobName", equalTo("items_hook"))
+            .extract().path("[0].id");
+        as(admin).get("/dead-letters/" + deadLetterId).then().statusCode(200).body("payload.changes.size()", equalTo(2));
+        as(admin).get("/overview").then().body("openDeadLetters", equalTo(1));
+
+        List<String> received = new CopyOnWriteArrayList<>();
+        HttpServer hook = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+        hook.createContext("/hook", exchange -> {
+            if (exchange.getRequestMethod().equals("POST")) received.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        hook.start();
+        try {
+            as(admin).post("/connections/" + hookId + "/test").then().body("ok", equalTo(true));
+            as(admin).body(Map.of("ids", List.of(deadLetterId))).post("/dead-letters/retry").then().statusCode(200)
+                .body("resolved", equalTo(1)).body("failed.size()", equalTo(0));
+            assertThat(received).singleElement().asString().contains("\"job\":\"items_hook\"").contains("\"op\":\"upsert\"");
+            as(admin).queryParam("jobId", jobId).get("/dead-letters").then().body("size()", equalTo(0));
+            as(admin).queryParam("status", "RESOLVED").get("/dead-letters").then().body("[0].resolution", equalTo("RETRIED"));
+            as(admin).get("/audit").then().body("action", hasItem("dead-letter.retry")).body("action", hasItem("job.pause"));
+
+            as(admin).post("/jobs/" + jobId + "/resume").then().statusCode(200);
+            as(admin).post("/jobs/" + jobId + "/run").then().statusCode(202);
+            awaitRunFinished(admin, jobId);
+            as(admin).get("/jobs/" + jobId).then().body("lastRun.state", equalTo("SUCCEEDED"));
+            as(admin).delete("/jobs/" + jobId).then().statusCode(204);
+            as(admin).queryParam("status", "ALL").queryParam("jobId", jobId).get("/dead-letters").then().body("size()", equalTo(0));
+        } finally {
+            hook.stop(0);
+        }
     }
 
     private static String login(String username, String password, boolean mustChange) {

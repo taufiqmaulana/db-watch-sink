@@ -68,6 +68,11 @@ public record DataSyncConfig(List<Map<String, Object>> connections, List<JobDef>
                 schedule, every, fixedDelay, jitterPercent, watermark, reconcile);
         }
 
+        public JobDef withSinks(List<Map<String, Object>> newSinks) {
+            return new JobDef(name, source, keys, columns, mode, batchSize, fetchSize, maxDeletePercent, queryTimeoutSeconds, newSinks,
+                schedule, every, fixedDelay, jitterPercent, watermark, reconcile);
+        }
+
         /** True for modes that read only rows changed since the last run (WATERMARK, HYBRID). */
         public boolean incremental() {
             return mode != Mode.SNAPSHOT_DIFF;

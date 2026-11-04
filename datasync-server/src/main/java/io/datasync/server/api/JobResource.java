@@ -58,6 +58,9 @@ public class JobResource {
 
     private static final String SELECT = "SELECT id, name, status, version, config_json, created_at, updated_at FROM job";
     private static final Set<String> DELETE_MODES = Set.of("SOFT", "HARD", "IGNORE");
+    private static final Set<String> DELETE_AS = Set.of("delete", "upsert-with-flag");
+    private static final Set<String> BATCH_MODES = Set.of("per-batch", "per-row");
+    private static final Set<String> ON_DEAD_LETTER = Set.of("PAUSE", "SKIP");
     private static final int PREVIEW_ROWS = 10;
 
     @Inject
@@ -117,7 +120,7 @@ public class JobResource {
         return get(id);
     }
 
-    /** Also removes the job's hash index and run history. Target tables are left alone. */
+    /** Also removes the job's hash index, run history and dead letters. Target tables are left alone. */
     @DELETE
     @Path("/{id}")
     public void delete(String id) {
@@ -128,6 +131,7 @@ public class JobResource {
             Db.update(c, "DELETE FROM sink_load WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM job_cursor WHERE job_id = ?", id);
             Db.update(c, "DELETE FROM run WHERE job_id = ?", id);
+            Db.update(c, "DELETE FROM dead_letter WHERE job_id = ?", id);
             return Db.update(c, "DELETE FROM job WHERE id = ?", id);
         });
         changed("job.delete", id, job.name());
@@ -213,7 +217,7 @@ public class JobResource {
             throw ApiErrors.conflict("A job named " + name + " already exists");
         }
         if (def.source() == null) throw new IllegalArgumentException("Choose a source");
-        if (role(ApiErrors.required(def.source().connection(), "Source connection")) == ConnectionRole.SINK) {
+        if (connection(ApiErrors.required(def.source().connection(), "Source connection")).role() == ConnectionRole.SINK) {
             throw new IllegalArgumentException("The source connection is a sink-only connection");
         }
         ApiErrors.required(def.source().object(), "Source table or view");
@@ -229,24 +233,61 @@ public class JobResource {
         JobSchedule.reconcile(def);
         if (def.sinks().isEmpty()) throw new IllegalArgumentException("Add at least one sink");
         if (def.sinks().stream().map(JobRunner::sinkId).distinct().count() < def.sinks().size()) {
-            throw new IllegalArgumentException("Two sinks write to the same target table");
+            throw new IllegalArgumentException("Two sinks write to the same target");
         }
-        for (Map<String, Object> sink : def.sinks()) {
-            if (!"jdbc".equals(sink.get("type"))) throw new IllegalArgumentException("Only database sinks are supported so far");
-            Object conn = sink.get("connection");
-            if (role(ApiErrors.required(conn == null ? null : conn.toString(), "Sink connection")) == ConnectionRole.SOURCE) {
-                throw new IllegalArgumentException("A sink uses a source-only connection");
-            }
-            Object target = sink.get("target");
-            ApiErrors.required(target == null ? null : target.toString(), "Sink target table");
-            Object deleteMode = sink.getOrDefault("deleteMode", "SOFT");
-            if (!DELETE_MODES.contains(String.valueOf(deleteMode).toUpperCase())) throw new IllegalArgumentException("Unknown delete mode " + deleteMode);
-        }
+        for (Map<String, Object> sink : def.sinks()) validateSink(sink);
         return def.withName(name);
     }
 
-    private ConnectionRole role(String connectionId) {
-        return db.one("SELECT role FROM connection WHERE id = ?", rs -> ConnectionRole.valueOf(rs.getString(1)), connectionId)
+    /** A database sink writes to a target table on a database connection; a webhook sink posts to a webhook connection. */
+    private void validateSink(Map<String, Object> sink) {
+        String type = String.valueOf(sink.get("type"));
+        if (!Set.of("jdbc", "webhook").contains(type)) throw new IllegalArgumentException("Unknown sink type " + type);
+        Object conn = sink.get("connection");
+        Conn connection = connection(ApiErrors.required(conn == null ? null : conn.toString(), "Sink connection"));
+        if (connection.role() == ConnectionRole.SOURCE) throw new IllegalArgumentException("A sink uses a source-only connection");
+        boolean webhook = type.equals("webhook");
+        if (webhook != connection.kind().equals("webhook")) {
+            throw new IllegalArgumentException(webhook ? "A webhook sink needs a webhook connection" : "A database sink needs a database connection");
+        }
+        if (!webhook) {
+            ApiErrors.required(text(sink.get("target")), "Sink target table");
+            oneOf(String.valueOf(sink.getOrDefault("deleteMode", "SOFT")).toUpperCase(), DELETE_MODES, "delete mode");
+        } else {
+            oneOf(String.valueOf(sink.getOrDefault("deleteAs", "delete")), DELETE_AS, "delete handling");
+            if (sink.get("batch") instanceof Map<?, ?> batch) {
+                if (batch.get("mode") != null) oneOf(batch.get("mode").toString(), BATCH_MODES, "batch mode");
+                if (batch.get("maxRows") != null) ApiErrors.range(number(batch.get("maxRows"), "Rows per request"), 1, 10_000, "Rows per request");
+            }
+            if (sink.get("timeoutSeconds") != null) ApiErrors.range(number(sink.get("timeoutSeconds"), "Timeout"), 1, 300, "Timeout");
+        }
+        oneOf(String.valueOf(sink.getOrDefault("onDeadLetter", "PAUSE")).toUpperCase(), ON_DEAD_LETTER, "dead letter handling");
+        if (sink.get("retry") instanceof Map<?, ?> retry && retry.get("maxAttempts") != null) {
+            ApiErrors.range(number(retry.get("maxAttempts"), "Attempts"), 1, 20, "Attempts");
+        }
+    }
+
+    private static void oneOf(String value, Set<String> allowed, String what) {
+        if (!allowed.contains(value)) throw new IllegalArgumentException("Unknown " + what + " " + value);
+    }
+
+    private static int number(Object value, String what) {
+        try {
+            return Integer.parseInt(value.toString().trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(what + " must be a whole number");
+        }
+    }
+
+    private static String text(Object value) {
+        return value == null ? null : value.toString();
+    }
+
+    private record Conn(String kind, ConnectionRole role) {}
+
+    private Conn connection(String connectionId) {
+        return db.one("SELECT kind, role FROM connection WHERE id = ?", rs -> new Conn(rs.getString(1), ConnectionRole.valueOf(rs.getString(2))),
+                connectionId)
             .orElseThrow(() -> new IllegalArgumentException("Connection " + connectionId + " does not exist"));
     }
 
