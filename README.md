@@ -58,6 +58,8 @@ Other endpoints:
 
 - REST API: `/api/v1`, described by the OpenAPI document at `/q/openapi`
 - Health checks: `/q/health/live` and `/q/health/ready`
+- Prometheus metrics: `/metrics`, including `datasync_skipped_ticks_total{job}` (scheduled runs skipped because
+  the previous one was still going). Like the health checks, it needs no sign-in; restrict it at your proxy if needed.
 
 ### Using the UI
 
@@ -79,7 +81,12 @@ Each job picks how it finds changes:
 | **Hybrid** | As Watermark, plus a full comparison (**reconcile**) on its own cron | At each reconcile | Large tables that need deletes and a safety net for missed updates |
 
 Rows whose watermark is NULL are only picked up by reconciles. **Reconcile** on the job page (or
-`--reconcile` on the CLI) runs one on demand.
+`--reconcile` on the CLI) runs one on demand. The job page warns when runs take more than half the time between them.
+
+Columns can be converted to another type (**Sync as** in the wizard, `columns.coerce` in YAML), e.g. an Oracle
+`NUMBER(1)` or `'Y'`/`'N'` flag to `BOOLEAN`. Oracle stores empty text as NULL; by default (`emptyStrings: AUTO`)
+empty text becomes NULL whenever a sink is Oracle, so every target agrees. With **Skip rewriting unchanged rows**
+(`rowHash: true`), a sink keeps a `_row_hash` column and leaves rows alone when a re-send would not change them.
 
 Deletes are **soft** by default: the target row stays, with `_deleted_at` and `_is_deleted` set. If the row
 comes back at the source, both are cleared. When a run would delete more than the job's **delete guard**

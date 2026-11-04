@@ -15,7 +15,12 @@ jobs:
   - name: customers_sync
     source: { connection: oracle_prod, object: HR.CUSTOMERS_V }
     keys: [CUSTOMER_ID]               # required for views; tables default to their primary key
-    columns: { include: "*", exclude: [], rename: { CUST_NAME: customer_name } }
+    columns:
+      include: "*"
+      exclude: []
+      rename: { CUST_NAME: customer_name }
+      coerce: { IS_VIP: BOOLEAN }       # convert a column's type, e.g. an Oracle NUMBER(1) flag
+      emptyStrings: AUTO                # AUTO (NULL when a sink is Oracle) | KEEP | EMPTY_TO_NULL
     mode: SNAPSHOT_DIFF               # or WATERMARK (read only changed rows) or HYBRID (watermark + reconcile)
     # watermark: { column: UPDATED_AT, overlap: 5m }   # WATERMARK and HYBRID: an update time or increasing id
     # reconcile: { cron: "0 2 * * *" }                 # HYBRID: full compare that also applies deletes
@@ -33,3 +38,4 @@ jobs:
         target: public.customers
         autoCreate: true
         deleteMode: SOFT                # SOFT | HARD | IGNORE
+        rowHash: true                   # keep a _row_hash column and skip rewriting unchanged rows
