@@ -90,6 +90,11 @@ data volume (the state store is a single SQLite file), behind a reverse proxy th
 Use `/q/health/ready` for load balancer and orchestrator checks; it reports down when the state store does not
 answer.
 
+The `Docker image` GitHub workflow (`.github/workflows/docker-publish.yml`) publishes the image to Docker Hub: every
+push to `master` as `:master`, and every `vX.Y.Z` tag as `:X.Y.Z`, `:X.Y`, `:X` and `:latest`. It needs the repository
+secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`; the image is `<username>/datasync` unless the repository variable
+`DOCKERHUB_REPOSITORY` says otherwise.
+
 Security built in: passwords hashed with Argon2id, stored credentials encrypted with AES-GCM, an HttpOnly,
 SameSite=Strict session cookie (8 hours idle), sign-in refused for 15 minutes after 5 failed attempts for a username
 or 20 from one address (recorded in the audit log), and a strict Content-Security-Policy, `X-Frame-Options: DENY`
