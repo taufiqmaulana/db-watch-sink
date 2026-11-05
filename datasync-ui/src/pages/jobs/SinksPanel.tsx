@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Loader2, PauseCircle, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, PauseCircle, RefreshCw, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api, call, type JobView, type Schemas } from "@/api/client";
@@ -10,22 +10,31 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, Table, Td, Th } from "@/components/ui/layout";
 import { cn, formatNumber, formatRelative } from "@/lib/format";
 
-type SinkView = Schemas["SinkView"];
+export type SinkView = Schemas["SinkView"];
+
+export type SinkTone = "good" | "warning" | "critical" | "info";
+
+/** A sink's delivery state as an icon, a label and a tone; shared by the table and the flow diagram. */
+export function sinkState(sink: SinkView): { icon: LucideIcon; label: string; tone: SinkTone; spin: boolean } {
+  if (sink.status === "PAUSED") return { icon: PauseCircle, label: "Paused", tone: "warning", spin: false };
+  if (sink.status === "RESNAPSHOT_REQUIRED") return { icon: AlertTriangle, label: "Needs resnapshot", tone: "critical", spin: false };
+  if (sink.delivering) return { icon: Loader2, label: "Delivering", tone: "info", spin: true };
+  if (sink.attempts > 0) return { icon: RefreshCw, label: "Retrying", tone: "warning", spin: false };
+  return { icon: CheckCircle2, label: sink.backlog ? "Waiting" : "Up to date", tone: "good", spin: false };
+}
+
+const toneText: Record<SinkTone, string> = {
+  good: "text-good-text",
+  warning: "text-warning-text",
+  critical: "text-critical-text",
+  info: "text-primary",
+};
 
 /** Status is an icon plus a label, never color alone. */
 function SinkStatus({ sink }: { sink: SinkView }) {
-  const [Icon, label, tone, spin] =
-    sink.status === "PAUSED"
-      ? [PauseCircle, "Paused", "text-warning-text", false]
-      : sink.status === "RESNAPSHOT_REQUIRED"
-        ? [AlertTriangle, "Needs resnapshot", "text-critical-text", false]
-        : sink.delivering
-          ? [Loader2, "Delivering", "text-primary", true]
-          : sink.attempts > 0
-            ? [RefreshCw, "Retrying", "text-warning-text", false]
-            : [CheckCircle2, sink.backlog ? "Waiting" : "Up to date", "text-good-text", false];
+  const { icon: Icon, label, tone, spin } = sinkState(sink);
   return (
-    <span className={cn("inline-flex items-center gap-1.5 text-sm font-medium whitespace-nowrap", tone)}>
+    <span className={cn("inline-flex items-center gap-1.5 text-sm font-medium whitespace-nowrap", toneText[tone])}>
       <Icon className={cn("size-4", spin && "animate-spin")} aria-hidden />
       {label}
     </span>

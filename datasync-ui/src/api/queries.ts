@@ -45,12 +45,13 @@ export const useOverview = () => useQuery({ queryKey: keys.overview, queryFn: ()
 export const useJobs = () =>
   useQuery({ queryKey: keys.jobs, queryFn: () => call(api.GET("/api/v1/jobs")), refetchInterval: 30_000 });
 
-export const useJob = (id: string | undefined) =>
+/** Refreshed every 30 s by default; a view that animates live state can ask for a shorter interval while it is mounted. */
+export const useJob = (id: string | undefined, refetchInterval = 30_000) =>
   useQuery({
     queryKey: keys.job(id ?? ""),
     queryFn: () => call(api.GET("/api/v1/jobs/{id}", { params: { path: { id: id! } } })),
     enabled: Boolean(id),
-    refetchInterval: 30_000,
+    refetchInterval,
   });
 
 export const useRuns = (id: string) =>

@@ -16,6 +16,7 @@ import { formatDateTime, formatDuration, formatNumber, formatRelative } from "@/
 import { toYaml } from "@/lib/yaml";
 import { nextRunLabel, useConnectionNames, useJobActions } from "./actions";
 import { describeMode, describeSchedule, describeSinkDelivery, sinkTarget } from "./jobForm";
+import { JobFlowDiagram } from "./JobFlowDiagram";
 import { SinksPanel } from "./SinksPanel";
 
 // Recharts is large; load it only when a job page shows the chart
@@ -134,6 +135,7 @@ export function JobDetailPage() {
       <Tabs
         tabs={[
           { value: "overview", label: "Overview", content: <Overview job={j} runs={runs.data ?? []} /> },
+          { value: "flow", label: "Flow", content: <JobFlowDiagram job={j} /> },
           { value: "runs", label: "Runs", content: <RunsTable runs={runs.data} error={runs.error} /> },
           { value: "sinks", label: "Sinks", content: <SinksPanel job={j} /> },
           {

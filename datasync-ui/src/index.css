@@ -82,3 +82,22 @@
     border-radius: 0.25rem;
   }
 }
+
+/* Job flow diagram: dots travel along an edge while data moves on it. */
+@keyframes flow-dots {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+.flow-dots {
+  stroke-dasharray: 0.1 18;
+  animation: flow-dots 0.6s linear infinite;
+}
+.flow-dots-slow {
+  animation-duration: 2.4s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow-dots {
+    animation: none;
+  }
+}
