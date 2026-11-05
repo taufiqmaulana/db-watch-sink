@@ -13,6 +13,7 @@ services:
       DATASYNC_MASTER_KEY: ${DATASYNC_MASTER_KEY:?set DATASYNC_MASTER_KEY}
       DATASYNC_ADMIN_PASSWORD: ${DATASYNC_ADMIN_PASSWORD:-}
       # DATASYNC_LOG_JSON: "true"
+      # DATASYNC_CONTEXT_PATH: /datasync   # for a proxy that forwards https://host/datasync/... unchanged
       # DATASYNC_WEBHOOK_BLOCK_PRIVATE_NETWORKS: "true"
       # QUARKUS_MAILER_HOST: smtp.example.com
       # QUARKUS_MAILER_FROM: datasync@example.com

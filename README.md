@@ -59,6 +59,7 @@ Open http://localhost:8080 and sign in as `admin`. You are asked to choose a new
 | `QUARKUS_MAILER_HOST`, `_PORT`, `_FROM`, `_USERNAME`, `_PASSWORD`, `_TLS` | none | SMTP server for alert emails. Set them before adding email recipients under **Settings, Alerts and retention** |
 | `DATASYNC_WEBHOOK_BLOCK_PRIVATE_NETWORKS` | `false` | Also refuse webhook URLs on loopback and private networks. Link-local addresses (such as cloud metadata at 169.254.169.254) are always refused |
 | `QUARKUS_HTTP_PORT` | `8080` | HTTP port |
+| `DATASYNC_CONTEXT_PATH` | `/` | Serve everything under this path, such as `/datasync`, for a proxy that forwards the full path. See [Behind a reverse proxy](#behind-a-reverse-proxy) |
 
 Other endpoints:
 
@@ -99,6 +100,40 @@ Security built in: passwords hashed with Argon2id, stored credentials encrypted 
 SameSite=Strict session cookie (8 hours idle), sign-in refused for 15 minutes after 5 failed attempts for a username
 or 20 from one address (recorded in the audit log), and a strict Content-Security-Policy, `X-Frame-Options: DENY`
 and `nosniff` on every response. Keep `/metrics` and `/q/openapi` internal at the proxy.
+
+### Behind a reverse proxy
+
+DataSync can sit under a path of a shared host, such as `https://tools.example.com/datasync/`. The UI uses relative
+URLs, so either proxy style works:
+
+- **The proxy strips the prefix** and forwards `/datasync/jobs` as `/jobs`. Nothing to set on DataSync. Have the
+  proxy send `X-Forwarded-Prefix: /datasync` so the session cookie is scoped to that path instead of the whole host.
+
+  ```nginx
+  location /datasync/ {
+      proxy_pass http://127.0.0.1:8080/;           # trailing slash: strips /datasync
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Prefix /datasync;
+      proxy_buffering off;                         # live updates (server-sent events)
+      proxy_read_timeout 1h;
+  }
+  ```
+
+- **The proxy forwards the full path**, as with most Kubernetes ingresses. Set `DATASYNC_CONTEXT_PATH=/datasync`;
+  the UI, API, `/q/health`, `/q/openapi` and `/metrics` are then all under `/datasync`. The health checks also stay
+  at `/q/health` without the prefix, for container probes.
+
+  ```nginx
+  location /datasync/ {
+      proxy_pass http://127.0.0.1:8080;            # no trailing slash: keeps /datasync
+      # same headers and buffering as above, without X-Forwarded-Prefix
+  }
+  ```
+
+Open the app with the trailing slash (`/datasync/`); nginx and DataSync both redirect `/datasync` to it. Proxies
+must pass `X-Forwarded-Proto`, so the session cookie is marked `Secure` behind TLS.
 
 ### Sizing
 

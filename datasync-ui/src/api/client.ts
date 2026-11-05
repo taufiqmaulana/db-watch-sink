@@ -44,7 +44,13 @@ export interface WebhookSinkConfig extends DeliveryConfig {
 
 export type SinkConfig = JdbcSinkConfig | WebhookSinkConfig;
 
-export const api = createClient<paths>({ baseUrl: "" });
+/**
+ * The path the app is served under, without a trailing slash: "" at the server root, "/datasync" behind a proxy
+ * that maps https://host/datasync/ to the server. The UI uses a hash router, so the page's own path is that base.
+ */
+export const basePath = new URL(".", window.location.href).pathname.replace(/\/+$/, "");
+
+export const api = createClient<paths>({ baseUrl: basePath });
 
 /** A failed call: a human message plus, sometimes, technical detail. */
 export class ApiError extends Error {

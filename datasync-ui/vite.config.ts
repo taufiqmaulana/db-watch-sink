@@ -5,6 +5,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": "/src" } },
+  // relative asset URLs, so the UI works under any context path (behind a proxy, or QUARKUS_HTTP_ROOT_PATH)
+  base: "./",
   build: {
     // packaged into the jar and served by the server as static resources
     outDir: "target/classes/META-INF/resources",

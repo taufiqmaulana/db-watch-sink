@@ -1,6 +1,7 @@
 package io.datasync.server.api;
 
 import io.datasync.server.Audit;
+import io.datasync.server.ContextPath;
 import io.datasync.server.Db;
 import io.datasync.server.auth.CurrentUser;
 import io.datasync.server.auth.Passwords;
@@ -52,6 +53,9 @@ public class AuthResource {
     @Inject
     LoginThrottle throttle;
 
+    @Inject
+    ContextPath contextPath;
+
     @POST
     @Path("/login")
     @Public
@@ -77,15 +81,16 @@ public class AuthResource {
         Sessions.Session session = sessions.create(user.id(), user.username(), user.role(), user.mustChangePassword());
         audit.record(user.username(), "auth.login", "user:" + user.id(), Map.of());
         return RestResponse.ResponseBuilder.ok(new Me(user.username(), user.role(), user.mustChangePassword()))
-            .cookie(cookie(session.token(), security.isSecure())).build();
+            .cookie(cookie(session.token(), security.isSecure(), cookiePath(request))).build();
     }
 
     @POST
     @Path("/logout")
     @Requires(Role.VIEWER)
-    public RestResponse<Void> logout(@CookieParam(Sessions.COOKIE) String token, @Context SecurityContext security) {
+    public RestResponse<Void> logout(@CookieParam(Sessions.COOKIE) String token, @Context SecurityContext security,
+                                     @Context HttpServerRequest request) {
         sessions.remove(token);
-        return RestResponse.ResponseBuilder.<Void>noContent().cookie(cookie(null, security.isSecure())).build();
+        return RestResponse.ResponseBuilder.<Void>noContent().cookie(cookie(null, security.isSecure(), cookiePath(request))).build();
     }
 
     @GET
@@ -113,11 +118,16 @@ public class AuthResource {
         return new Me(s.username(), s.role(), false);
     }
 
+    /** Scopes the session cookie to the path the browser sees the app under, not to other apps on the same host. */
+    private String cookiePath(HttpServerRequest request) {
+        return contextPath.publicPath(request.getHeader("X-Forwarded-Prefix"));
+    }
+
     /** HttpOnly and SameSite=Strict; a null token clears the cookie. */
-    private static NewCookie cookie(String token, boolean secure) {
+    private static NewCookie cookie(String token, boolean secure, String path) {
         return new NewCookie.Builder(Sessions.COOKIE)
             .value(token == null ? "" : token)
-            .path("/")
+            .path(path)
             .httpOnly(true)
             .secure(secure)
             .sameSite(NewCookie.SameSite.STRICT)
