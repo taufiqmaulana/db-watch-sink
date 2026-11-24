@@ -47,7 +47,14 @@ public final class JdbcProviders {
     private static HikariDataSource pool(ConnectionConfig c, boolean readOnly) {
         HikariConfig h = new HikariConfig();
         h.setPoolName(c.name());
-        h.setJdbcUrl(c.require("url"));
+        String url = c.require("url");
+        h.setJdbcUrl(url);
+        if (url.startsWith("jdbc:oracle:")) {
+            // The driver sends the JVM zone as a region name (e.g. Asia/Jakarta); older servers such as 11g may not
+            // know it and fail logon with ORA-01882. Sending an offset (+07:00) works on every version.
+            h.addDataSourceProperty("oracle.jdbc.timezoneAsRegion",
+                c.props().getOrDefault("oracle.jdbc.timezoneAsRegion", "false"));
+        }
         h.setUsername(c.props().get("username"));
         h.setPassword(c.props().get("password"));
         h.setMaximumPoolSize(Integer.parseInt(c.props().getOrDefault("maxConcurrency", "2")));
